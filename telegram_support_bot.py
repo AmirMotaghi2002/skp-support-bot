@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 # ====== تنظیمات اولیه ======
-TOKEN = "8498747088:AAFSlvOHMEcAyhfPJ0h0C7FTnKRNn6LCG4o"
+TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
 DEFAULT_GROUP_CHAT_ID = None  # اگر می‌خواهید مستقیماً داخل کد وارد کنید، اینجا مقدار را قرار دهید
 
