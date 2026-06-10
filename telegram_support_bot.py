@@ -347,7 +347,17 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     course = context.user_data.get("selected_course")
-    logger.info("receive_question from %s, course=%s", user.id if user else None, course)
+    
+    logger.info("=== receive_question شروع ===")
+    logger.info("User: %s, Course: %s", user.id, course)
+    logger.info("Message attributes - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
+                bool(update.message.text), 
+                bool(update.message.photo), 
+                bool(update.message.video),
+                bool(update.message.voice), 
+                bool(update.message.document), 
+                bool(update.message.audio),
+                bool(update.message.animation))
     
     # متغیرها برای نوع رسانه
     question_text = None
@@ -361,8 +371,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 bool(update.message.animation))
     
     if update.message.text:
-        question_text = update.message.text.strip()
-    elif update.message.photo:
         question_text = update.message.caption or "عکس ارسال شده"
         media_file_id = update.message.photo[-1].file_id
         media_type = "photo"
@@ -452,6 +460,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         # اگر رسانه وجود دارد، آن را هم ارسال کن
         if media_file_id and media_type:
+            logger.info("ارسال رسانه: type=%s, file_id=%s", media_type, media_file_id)
             try:
                 if media_type == "photo":
                     await context.bot.send_photo(chat_id=group_chat_id, photo=media_file_id, caption="📷 عکس مربوط به سوال")
@@ -690,6 +699,14 @@ async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.warning("Unknown message - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
+                   bool(update.message.text) if update.message else False,
+                   bool(update.message.photo) if update.message else False,
+                   bool(update.message.video) if update.message else False,
+                   bool(update.message.voice) if update.message else False,
+                   bool(update.message.document) if update.message else False,
+                   bool(update.message.audio) if update.message else False,
+                   bool(update.message.animation) if update.message else False)
     await update.message.reply_text(MESSAGES["unknown"])
 
 
