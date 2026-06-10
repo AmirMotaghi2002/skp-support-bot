@@ -596,7 +596,41 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(MESSAGES["no_pending_question"])
         return
 
-    answer_text = update.message.text.strip()
+    # تشخیص نوع پاسخ (متن یا رسانه)
+    answer_text = None
+    answer_media_file_id = None
+    answer_media_type = None
+    
+    if update.message.text:
+        answer_text = update.message.text.strip()
+    elif update.message.photo:
+        answer_text = update.message.caption or "📷 عکس پاسخ"
+        answer_media_file_id = update.message.photo[-1].file_id
+        answer_media_type = "photo"
+    elif update.message.video:
+        answer_text = update.message.caption or "🎥 ویدیو پاسخ"
+        answer_media_file_id = update.message.video.file_id
+        answer_media_type = "video"
+    elif update.message.voice:
+        answer_text = update.message.caption or "🎙️ ویس پاسخ"
+        answer_media_file_id = update.message.voice.file_id
+        answer_media_type = "voice"
+    elif update.message.audio:
+        answer_text = update.message.caption or "🎵 آهنگ پاسخ"
+        answer_media_file_id = update.message.audio.file_id
+        answer_media_type = "audio"
+    elif update.message.document:
+        answer_text = update.message.caption or "📎 فایل پاسخ"
+        answer_media_file_id = update.message.document.file_id
+        answer_media_type = "document"
+    elif update.message.animation:
+        answer_text = update.message.caption or "🎬 GIF پاسخ"
+        answer_media_file_id = update.message.animation.file_id
+        answer_media_type = "animation"
+    else:
+        await update.message.reply_text("لطفاً متن یا رسانه‌ای برای پاسخ ارسال کنید.")
+        return
+
     question = state_data["questions"].get(pending)
     if not question:
         await update.message.reply_text(MESSAGES["question_not_found"])
@@ -604,6 +638,8 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     question["status"] = "answered"
     question["answer"] = answer_text
+    question["answer_media_file_id"] = answer_media_file_id
+    question["answer_media_type"] = answer_media_type
     state_data["teacher_pending"].pop(teacher_id, None)
     save_state(state_data)
 
@@ -622,6 +658,26 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ]
         )
         await context.bot.send_message(chat_id=question["student_id"], text=student_message, reply_markup=post_keyboard)
+        
+        # ارسال رسانه‌ی پاسخ اگر موجود باشد
+        if answer_media_file_id and answer_media_type:
+            logger.info("ارسال رسانه‌ی پاسخ: type=%s, file_id=%s", answer_media_type, answer_media_file_id)
+            try:
+                if answer_media_type == "photo":
+                    await context.bot.send_photo(chat_id=question["student_id"], photo=answer_media_file_id, caption="📷 عکس پاسخ")
+                elif answer_media_type == "video":
+                    await context.bot.send_video(chat_id=question["student_id"], video=answer_media_file_id, caption="🎥 ویدیو پاسخ")
+                elif answer_media_type == "voice":
+                    await context.bot.send_voice(chat_id=question["student_id"], voice=answer_media_file_id, caption="🎙️ ویس پاسخ")
+                elif answer_media_type == "audio":
+                    await context.bot.send_audio(chat_id=question["student_id"], audio=answer_media_file_id, caption="🎵 آهنگ پاسخ")
+                elif answer_media_type == "document":
+                    await context.bot.send_document(chat_id=question["student_id"], document=answer_media_file_id, caption="📎 فایل پاسخ")
+                elif answer_media_type == "animation":
+                    await context.bot.send_animation(chat_id=question["student_id"], animation=answer_media_file_id, caption="🎬 GIF پاسخ")
+            except Exception as e:
+                logger.error("خطا در ارسال رسانه‌ی پاسخ به دانشجو: %s", e)
+        
         await update.message.reply_text(MESSAGES["answer_sent"])
     except Exception as e:
         logger.error("ارسال پاسخ استاد به دانشجو با خطا مواجه شد: %s", e)
