@@ -685,7 +685,7 @@ def main() -> None:
             STUDENT_COURSE: [CallbackQueryHandler(course_selected, pattern=r"^course:")],
             STUDENT_QUESTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question),
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE | filters.Document, receive_question),
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE | filters.DOCUMENT, receive_question),
             ],
         },
         fallbacks=[CommandHandler("start", start)],
