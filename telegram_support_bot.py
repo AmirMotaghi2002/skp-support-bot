@@ -28,9 +28,13 @@ from telegram.ext import (
 # ====== تنظیمات اولیه ======
 TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
+MEDIA_DIR = "media"  # پوشه برای ذخیره فایل‌های رسانه‌ای
 DEFAULT_GROUP_CHAT_ID = os.environ.get(
     "TELEGRAM_GROUP_ID"
-)  # اگر می‌خواهید مستقیماً داخل کد وارد کنید، اینجا مقدار را قرار دهید
+)
+
+# ایجاد پوشه رسانه اگر وجود ندارد
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 COURSES = [
     "نقشه خوانی",
@@ -67,7 +71,8 @@ MESSAGES = {
         "📚 نحوه استفاده از ربات:\n\n"
         "1️⃣ ابتدا شماره تلفن خود را ثبت نمایید.\n\n"
         "2️⃣ سپس دوره آموزشی مورد نظر خود را از لیست دوره‌ها انتخاب کنید.\n\n"
-        "3️⃣ سوال فنی، آموزشی یا تخصصی خود را به صورت کامل و دقیق ارسال نمایید.\n\n"
+        "3️⃣ سوال فنی، آموزشی یا تخصصی خود را به صورت کامل و دقیق ارسال نمایید.\n"
+        "   (می‌توانید متن، عکس، ویدیو یا ویس ارسال کنید)\n\n"
         "4️⃣ سوال شما برای استاد مربوطه ارسال خواهد شد.\n\n"
         "5️⃣ پس از بررسی و پاسخگویی، جواب استاد از طریق همین ربات برای شما ارسال می‌شود.\n\n"
         "💡 برای دریافت پاسخ دقیق‌تر، لطفاً هنگام ثبت سوال مواردی مانند مدل خودرو، سال ساخت، نوع سیستم، کد خطا (در صورت وجود) و توضیحات کامل مشکل را ذکر نمایید.\n\n"
@@ -78,7 +83,7 @@ MESSAGES = {
     ),
     "group_set": "گروه پشتیبانی ثبت شد. اکنون سوال‌ها به این گروه ارسال می‌شود.\nID گروه: {group_id}",
     "setgroup_private": "این دستور را داخل گروه پشتیبانی اجرا کنید.",
-    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را تایپ و ارسال کن.",
+    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن (متن، عکس، ویدیو یا ویس).",
     "need_course": "ابتدا باید دوره را انتخاب کنید. /start را ارسال کنید.",
     "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه پشتیبانی اجرا کنید.",
     "question_sent": "سوال شما ثبت شد و به گروه اساتید ارسال شد. به زودی پاسخ دریافت می‌کنید.",
@@ -104,7 +109,6 @@ MESSAGES = {
     "unknown": "لطفاً از دستور /start برای شروع استفاده کنید یا سوال خود را پس از انتخاب دوره ارسال کنید.",
     "new_question_title": "سوال جدید ثبت شد:",
     "question_answered_group": "✅ این سوال توسط {teacher} پاسخ داده شد.",
-    "need_text": "لطفاً سوال خود را به صورت متن ارسال کنید.",
     "ask_again_button": "ارسال سوال جدید",
     "ask_again_prompt": "در صورت داشتن سوال مجدد، دوره خود را انتخاب کنید یا سوال را ارسال کنید.",
 }
@@ -227,6 +231,18 @@ def build_course_keyboard() -> list:
     return buttons
 
 
+async def download_media(context: ContextTypes.DEFAULT_TYPE, file_id: str, media_type: str) -> str:
+    """دانلود فایل رسانه‌ای و ذخیره آن"""
+    try:
+        file = await context.bot.get_file(file_id)
+        file_path = os.path.join(MEDIA_DIR, f"{uuid.uuid4()}_{media_type}")
+        await file.download_to_drive(file_path)
+        return file_path
+    except Exception as e:
+        logger.error("خطا در دانلود فایل: %s", e)
+        return None
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_chat.type != ChatType.PRIVATE:
         await update.message.reply_text(
@@ -264,7 +280,6 @@ async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def ask_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    # clear previous selection
     context.user_data.pop("selected_course", None)
     try:
         await context.bot.send_message(
@@ -273,7 +288,6 @@ async def ask_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(build_course_keyboard()),
         )
     except Exception:
-        # fallback: edit the message if sending fails
         try:
             await query.message.edit_text(MESSAGES["ask_again_prompt"], reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
         except Exception:
@@ -303,7 +317,6 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message.contact and update.message.contact.phone_number:
         phone = update.message.contact.phone_number
     elif update.message.text:
-        # accept typed phone numbers (basic validation)
         txt = update.message.text.strip()
         if any(ch.isdigit() for ch in txt):
             phone = txt
@@ -312,7 +325,6 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("شماره تلفن نامعتبر است. لطفاً مجدداً امتحان کنید.")
         return STUDENT_PHONE
 
-    # persist phone in state
     state_data = load_state()
     users = state_data.get("users") or {}
     users[str(user.id)] = users.get(str(user.id), {})
@@ -322,7 +334,6 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     context.user_data["phone"] = phone
     try:
-        # remove the contact keyboard and then ask to select course
         await context.bot.send_message(chat_id=user.id, text=f"شماره شما ثبت شد: {phone}", reply_markup=ReplyKeyboardRemove())
         await context.bot.send_message(chat_id=user.id, text="لطفاً دوره مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
     except Exception:
@@ -335,11 +346,33 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = update.effective_user
     course = context.user_data.get("selected_course")
     logger.info("receive_question from %s, course=%s", user.id if user else None, course)
-    # only accept text questions (media support removed)
+    
+    # متغیرها برای نوع رسانه
+    question_text = None
+    media_file_id = None
+    media_type = None
+    
+    # چک کردن نوع پیام
     if update.message.text:
         question_text = update.message.text.strip()
+    elif update.message.photo:
+        question_text = update.message.caption or "عکس ارسال شده"
+        media_file_id = update.message.photo[-1].file_id
+        media_type = "photo"
+    elif update.message.video:
+        question_text = update.message.caption or "ویدیو ارسال شده"
+        media_file_id = update.message.video.file_id
+        media_type = "video"
+    elif update.message.voice:
+        question_text = update.message.caption or "ویس ارسال شده"
+        media_file_id = update.message.voice.file_id
+        media_type = "voice"
+    elif update.message.document:
+        question_text = update.message.caption or "فایل ارسال شده"
+        media_file_id = update.message.document.file_id
+        media_type = "document"
     else:
-        await update.message.reply_text(MESSAGES["need_text"])
+        await update.message.reply_text("لطفاً متن، عکس، ویدیو یا ویس ارسال کنید.")
         return STUDENT_QUESTION
 
     if not course:
@@ -354,6 +387,12 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # دانلود رسانه اگر موجود باشد
+    local_media_path = None
+    if media_file_id:
+        local_media_path = await download_media(context, media_file_id, media_type)
+    
     state_data["questions"][question_id] = {
         "student_id": user.id,
         "student_name": user.full_name,
@@ -365,6 +404,9 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "assigned_teacher_id": None,
         "assigned_teacher_name": None,
         "answer": None,
+        "media_file_id": media_file_id,
+        "media_type": media_type,
+        "local_media_path": local_media_path,
     }
 
     keyboard = [
@@ -372,7 +414,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         [InlineKeyboardButton("❌ مربوط به این دوره نیست", callback_data=f"not_related:{question_id}")],
     ]
 
-    # include phone if available
     phone = None
     users = state_data.get("users") or {}
     if users.get(str(user.id)) and users.get(str(user.id)).get("phone"):
@@ -390,16 +431,31 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     try:
+        # ارسال پیام متنی و سپس رسانه
         msg = await context.bot.send_message(
             chat_id=group_chat_id,
             text=group_message,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         state_data["questions"][question_id]["group_message_id"] = msg.message_id
+        
+        # اگر رسانه وجود دارد، آن را هم ارسال کن
+        if media_file_id and media_type:
+            try:
+                if media_type == "photo":
+                    await context.bot.send_photo(chat_id=group_chat_id, photo=media_file_id, caption="📷 عکس مربوط به سوال")
+                elif media_type == "video":
+                    await context.bot.send_video(chat_id=group_chat_id, video=media_file_id, caption="🎥 ویدیو مربوط به سوال")
+                elif media_type == "voice":
+                    await context.bot.send_voice(chat_id=group_chat_id, voice=media_file_id, caption="🎙️ ویس مربوط به سوال")
+                elif media_type == "document":
+                    await context.bot.send_document(chat_id=group_chat_id, document=media_file_id, caption="📎 فایل مربوط به سوال")
+            except Exception as e:
+                logger.error("خطا در ارسال رسانه به گروه: %s", e)
+        
         save_state(state_data)
         await update.message.reply_text(MESSAGES["question_sent"])
 
-        # send an "ask again" button so student doesn't need to type /start
         try:
             await context.bot.send_message(
                 chat_id=user.id,
@@ -416,11 +472,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(MESSAGES["question_send_failed"])
 
     return ConversationHandler.END
-
-
-async def handle_non_text_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(MESSAGES["need_text"])
-    return STUDENT_QUESTION
 
 
 async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -461,6 +512,24 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     question=question["question"],
                 ),
             )
+            
+            # ارسال رسانه به استاد اگر موجود باشد
+            if question.get("media_file_id") and question.get("media_type"):
+                try:
+                    media_type = question["media_type"]
+                    media_file_id = question["media_file_id"]
+                    
+                    if media_type == "photo":
+                        await context.bot.send_photo(chat_id=teacher.id, photo=media_file_id, caption="📷 عکس سوال")
+                    elif media_type == "video":
+                        await context.bot.send_video(chat_id=teacher.id, video=media_file_id, caption="🎥 ویدیو سوال")
+                    elif media_type == "voice":
+                        await context.bot.send_voice(chat_id=teacher.id, voice=media_file_id, caption="🎙️ ویس سوال")
+                    elif media_type == "document":
+                        await context.bot.send_document(chat_id=teacher.id, document=media_file_id, caption="📎 فایل سوال")
+                except Exception as e:
+                    logger.error("خطا در ارسال رسانه به استاد: %s", e)
+                    
         except Exception as e:
             logger.error("خطا در ارسال پیام خصوصی به استاد: %s", e)
             await query.message.reply_text(MESSAGES["teacher_private_error"])
@@ -510,14 +579,12 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     try:
-        # include post-answer options: 'سوالی ندارم' -> poll, 'باز سوال دارم' -> allow re-ask
         post_keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("سوالی ندارم", callback_data=f"no_more:{pending}")],
                 [InlineKeyboardButton("باز سوال دارم", callback_data=f"ask_more:{pending}")],
             ]
         )
-        # send teacher's answer with the two option buttons attached
         await context.bot.send_message(chat_id=question["student_id"], text=student_message, reply_markup=post_keyboard)
         await update.message.reply_text(MESSAGES["answer_sent"])
     except Exception as e:
@@ -555,7 +622,6 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     if action == "no_more":
-        # send a quick poll to gather satisfaction
         try:
             await context.bot.send_poll(
                 chat_id=question["student_id"],
@@ -619,21 +685,18 @@ def main() -> None:
             STUDENT_COURSE: [CallbackQueryHandler(course_selected, pattern=r"^course:")],
             STUDENT_QUESTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question),
-                MessageHandler(~filters.TEXT & ~filters.COMMAND, handle_non_text_question),
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE | filters.Document, receive_question),
             ],
         },
         fallbacks=[CommandHandler("start", start)],
     )
 
     app.add_handler(conv_handler)
-    # handle post-answer buttons (poll or re-ask)
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
-    # allow course callback to work outside conversation so "ask again" button works
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
-    # handler for ask-again button
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teacher_reply))
     app.add_handler(MessageHandler(filters.ALL, unknown))
