@@ -803,7 +803,14 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
+    # استاد می‌تونه متن یا رسانه‌ای برای پاسخ بفرستد
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teacher_reply))
+    app.add_handler(MessageHandler(filters.PHOTO, teacher_reply))
+    app.add_handler(MessageHandler(filters.VIDEO, teacher_reply))
+    app.add_handler(MessageHandler(filters.VOICE, teacher_reply))
+    app.add_handler(MessageHandler(filters.AUDIO, teacher_reply))
+    app.add_handler(MessageHandler(filters.Document.ALL, teacher_reply))
+    app.add_handler(MessageHandler(filters.ANIMATION, teacher_reply))
     app.add_handler(MessageHandler(filters.ALL, unknown))
 
     stop_event = threading.Event()
