@@ -236,10 +236,12 @@ async def download_media(context: ContextTypes.DEFAULT_TYPE, file_id: str, media
     try:
         file = await context.bot.get_file(file_id)
         file_path = os.path.join(MEDIA_DIR, f"{uuid.uuid4()}_{media_type}")
+        logger.info("شروع دانلود %s (file_id: %s)", media_type, file_id)
         await file.download_to_drive(file_path)
+        logger.info("دانلود موفق: %s", file_path)
         return file_path
     except Exception as e:
-        logger.error("خطا در دانلود فایل: %s", e)
+        logger.error("خطا در دانلود %s: %s", media_type, e)
         return None
 
 
@@ -401,13 +403,8 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # دانلود رسانه اگر موجود باشد (اختیاری - اگر ناموفق بود، فقط file_id کافی است)
-    local_media_path = None
-    if media_file_id:
-        local_media_path = await download_media(context, media_file_id, media_type)
-        if not local_media_path:
-            logger.warning("دانلود %s ناموفق - از file_id استفاده می‌شود", media_type)
-    
+    # رسانه‌ها را بدون دانلود ذخیره کن - فقط file_id کافی است
+    # (Telegram خود file رو cache کرده، دانلود لازم نیست)
     state_data["questions"][question_id] = {
         "student_id": user.id,
         "student_name": user.full_name,
@@ -421,7 +418,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "answer": None,
         "media_file_id": media_file_id,
         "media_type": media_type,
-        "local_media_path": local_media_path,
     }
 
     keyboard = [
@@ -460,7 +456,11 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 if media_type == "photo":
                     await context.bot.send_photo(chat_id=group_chat_id, photo=media_file_id, caption="📷 عکس مربوط به سوال")
                 elif media_type == "video":
-                    await context.bot.send_video(chat_id=group_chat_id, video=media_file_id, caption="🎥 ویدیو مربوط به سوال")
+                    try:
+                        await context.bot.send_video(chat_id=group_chat_id, video=media_file_id, caption="🎥 ویدیو مربوط به سوال")
+                    except Exception as ve:
+                        logger.error("خطا در ارسال ویدیو به گروه: %s", ve)
+                        raise
                 elif media_type == "voice":
                     await context.bot.send_voice(chat_id=group_chat_id, voice=media_file_id, caption="🎙️ ویس مربوط به سوال")
                 elif media_type == "document":
@@ -541,7 +541,11 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if media_type == "photo":
                         await context.bot.send_photo(chat_id=teacher.id, photo=media_file_id, caption="📷 عکس سوال")
                     elif media_type == "video":
-                        await context.bot.send_video(chat_id=teacher.id, video=media_file_id, caption="🎥 ویدیو سوال")
+                        try:
+                            await context.bot.send_video(chat_id=teacher.id, video=media_file_id, caption="🎥 ویدیو سوال")
+                        except Exception as ve:
+                            logger.error("خطا در ارسال ویدیو به استاد: %s", ve)
+                            raise
                     elif media_type == "voice":
                         await context.bot.send_voice(chat_id=teacher.id, voice=media_file_id, caption="🎙️ ویس سوال")
                     elif media_type == "document":
