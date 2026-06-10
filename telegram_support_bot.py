@@ -353,6 +353,11 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     media_type = None
     
     # چک کردن نوع پیام
+    logger.info("Message type - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
+                bool(update.message.text), bool(update.message.photo), bool(update.message.video),
+                bool(update.message.voice), bool(update.message.document), bool(update.message.audio),
+                bool(update.message.animation))
+    
     if update.message.text:
         question_text = update.message.text.strip()
     elif update.message.photo:
@@ -396,10 +401,12 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # دانلود رسانه اگر موجود باشد
+    # دانلود رسانه اگر موجود باشد (اختیاری - اگر ناموفق بود، فقط file_id کافی است)
     local_media_path = None
     if media_file_id:
         local_media_path = await download_media(context, media_file_id, media_type)
+        if not local_media_path:
+            logger.warning("دانلود %s ناموفق - از file_id استفاده می‌شود", media_type)
     
     state_data["questions"][question_id] = {
         "student_id": user.id,
