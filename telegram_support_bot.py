@@ -685,11 +685,11 @@ def main() -> None:
             STUDENT_COURSE: [CallbackQueryHandler(course_selected, pattern=r"^course:")],
             STUDENT_QUESTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question),
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE | filters.DOCUMENT, receive_question),
             ],
         },
         fallbacks=[CommandHandler("start", start)],
     )
+
 
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
