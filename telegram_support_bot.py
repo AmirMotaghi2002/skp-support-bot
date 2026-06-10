@@ -83,7 +83,7 @@ MESSAGES = {
     ),
     "group_set": "گروه پشتیبانی ثبت شد. اکنون سوال‌ها به این گروه ارسال می‌شود.\nID گروه: {group_id}",
     "setgroup_private": "این دستور را داخل گروه پشتیبانی اجرا کنید.",
-    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن (متن، عکس، ویدیو یا ویس).",
+    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن (متن، عکس، ویدیو، ویس، فایل و غیره).",
     "need_course": "ابتدا باید دوره را انتخاب کنید. /start را ارسال کنید.",
     "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه پشتیبانی اجرا کنید.",
     "question_sent": "سوال شما ثبت شد و به گروه اساتید ارسال شد. به زودی پاسخ دریافت می‌کنید.",
@@ -368,11 +368,19 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         media_file_id = update.message.voice.file_id
         media_type = "voice"
     elif update.message.document:
-        question_text = update.message.caption or "فایل ارسال شده"
+        question_text = update.message.caption or "📎 فایل ارسال شده"
         media_file_id = update.message.document.file_id
         media_type = "document"
+    elif update.message.audio:
+        question_text = update.message.caption or "🎵 آهنگ ارسال شده"
+        media_file_id = update.message.audio.file_id
+        media_type = "audio"
+    elif update.message.animation:
+        question_text = update.message.caption or "🎬 GIF ارسال شده"
+        media_file_id = update.message.animation.file_id
+        media_type = "animation"
     else:
-        await update.message.reply_text("لطفاً متن، عکس، ویدیو یا ویس ارسال کنید.")
+        await update.message.reply_text("لطفاً متن، عکس، ویدیو، ویس، فایل یا رسانه دیگری ارسال کنید.")
         return STUDENT_QUESTION
 
     if not course:
@@ -450,6 +458,10 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     await context.bot.send_voice(chat_id=group_chat_id, voice=media_file_id, caption="🎙️ ویس مربوط به سوال")
                 elif media_type == "document":
                     await context.bot.send_document(chat_id=group_chat_id, document=media_file_id, caption="📎 فایل مربوط به سوال")
+                elif media_type == "audio":
+                    await context.bot.send_audio(chat_id=group_chat_id, audio=media_file_id, caption="🎵 آهنگ مربوط به سوال")
+                elif media_type == "animation":
+                    await context.bot.send_animation(chat_id=group_chat_id, animation=media_file_id, caption="🎬 GIF مربوط به سوال")
             except Exception as e:
                 logger.error("خطا در ارسال رسانه به گروه: %s", e)
         
@@ -527,6 +539,10 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await context.bot.send_voice(chat_id=teacher.id, voice=media_file_id, caption="🎙️ ویس سوال")
                     elif media_type == "document":
                         await context.bot.send_document(chat_id=teacher.id, document=media_file_id, caption="📎 فایل سوال")
+                    elif media_type == "audio":
+                        await context.bot.send_audio(chat_id=teacher.id, audio=media_file_id, caption="🎵 آهنگ سوال")
+                    elif media_type == "animation":
+                        await context.bot.send_animation(chat_id=teacher.id, animation=media_file_id, caption="🎬 GIF سوال")
                 except Exception as e:
                     logger.error("خطا در ارسال رسانه به استاد: %s", e)
                     
@@ -685,6 +701,7 @@ def main() -> None:
             STUDENT_COURSE: [CallbackQueryHandler(course_selected, pattern=r"^course:")],
             STUDENT_QUESTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question),
+                MessageHandler(~filters.COMMAND, receive_question),  # پذیرش تمام رسانه‌ها (photo, video, voice, document, etc)
             ],
         },
         fallbacks=[CommandHandler("start", start)],
