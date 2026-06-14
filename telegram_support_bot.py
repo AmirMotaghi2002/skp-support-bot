@@ -42,6 +42,15 @@ COURSES = [
     "ایمو بلایزر و تعریف ریموت", "وینولز",
 ]
 
+STUDENT_MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["❓ سوال جدید", "📋 وضعیت سوالم"],
+        ["📂 تاریخچه سوالات", "ℹ️ راهنما"],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+)
+
 MESSAGES = {
     "welcome": (
         "🔧 به ربات پشتیبانی آموزشی آکادمی SKP خوش آمدید\n\n"
@@ -66,7 +75,7 @@ MESSAGES = {
         "می‌توانی چند پیام، عکس، ویدیو یا ویس پشت سر هم بفرستی.\n"
         "وقتی تمام شد دکمه «📨 ارسال سوال» را بزن."
     ),
-    "need_course": "ابتدا باید دوره را انتخاب کنید. /start را ارسال کنید.",
+    "need_course": "ابتدا باید دوره را انتخاب کنید.",
     "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه اجرا کنید.",
     "question_sent": "✅ سوال شما ({count} پیام) ثبت شد و به گروه اساتید ارسال شد.",
     "question_send_failed": "ارسال سوال به گروه موفق نبود.",
@@ -86,10 +95,9 @@ MESSAGES = {
     "question_not_found": "سوال پیدا نشد یا قبلاً بسته شده است.",
     "answer_sent": "پاسخ شما با موفقیت به دانشجو ارسال شد.",
     "answer_send_failed": "خطا در ارسال پاسخ به دانشجو.",
-    "unknown": "لطفاً از دستور /start برای شروع استفاده کنید.",
+    "unknown": "از منوی پایین گزینه مورد نظر را انتخاب کنید.",
     "question_answered_group": "✅ این سوال توسط {teacher} پاسخ داده شد.",
-    "ask_again_button": "ارسال سوال جدید",
-    "ask_again_prompt": "در صورت داشتن سوال مجدد، دوره خود را انتخاب کنید.",
+    "ask_again_prompt": "از منوی پایین می‌توانید سوال جدید ثبت کنید.",
     "no_permission": "⛔ شما دسترسی به این دستور را ندارید.",
     "no_parts": "هنوز پیامی ارسال نکرده‌اید. ابتدا سوال خود را بنویسید.",
     "status_open": "🟡 در انتظار بررسی استاد",
@@ -105,6 +113,8 @@ MESSAGES = {
 SUBMIT_QUESTION_BTN = "submit_question"
 STUDENT_PHONE, STUDENT_COURSE, STUDENT_QUESTION = range(3)
 ANNOUNCE_TEXT, ANNOUNCE_CONFIRM_STATE = range(3, 5)
+
+MENU_BUTTONS = {"❓ سوال جدید", "📋 وضعیت سوالم", "📂 تاریخچه سوالات", "ℹ️ راهنما"}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -393,7 +403,7 @@ async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reverse=True,
     )
     if not my_questions:
-        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.")
+        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.", reply_markup=STUDENT_MAIN_KEYBOARD)
         return
     lines = ["📋 *وضعیت سوالات شما (۵ سوال آخر):*\n"]
     for i, q in enumerate(my_questions[:5], 1):
@@ -411,7 +421,7 @@ async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             ans = q["answer"][:60] + ("..." if len(q["answer"]) > 60 else "")
             lines.append(f"   ✅ پاسخ: {ans}")
         lines.append("")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=STUDENT_MAIN_KEYBOARD)
 
 
 # ====== تاریخچه سوالات ======
@@ -425,7 +435,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reverse=True,
     )
     if not my_questions:
-        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.")
+        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.", reply_markup=STUDENT_MAIN_KEYBOARD)
         return
     total = len(my_questions)
     answered = sum(1 for q in my_questions if q.get("status") == "answered")
@@ -449,7 +459,40 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     if total > 10:
         lines.append(f"\n_... و {total - 10} سوال قدیمی‌تر_")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=STUDENT_MAIN_KEYBOARD)
+
+
+# ====== منوی ثابت دانشجو ======
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.message.text
+
+    if text == "❓ سوال جدید":
+        context.user_data["pending_parts"] = []
+        context.user_data["submit_msg_id"] = None
+        await update.message.reply_text(
+            "لطفاً دوره مورد نظر را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(build_course_keyboard()),
+        )
+
+    elif text == "📋 وضعیت سوالم":
+        await mystatus_command(update, context)
+
+    elif text == "📂 تاریخچه سوالات":
+        await history_command(update, context)
+
+    elif text == "ℹ️ راهنما":
+        await update.message.reply_text(
+            "📚 *راهنمای استفاده از ربات*\n\n"
+            "❓ *سوال جدید* — ثبت سوال جدید\n"
+            "📋 *وضعیت سوالم* — مشاهده وضعیت ۵ سوال آخر\n"
+            "📂 *تاریخچه سوالات* — مشاهده همه سوالات قبلی\n\n"
+            "⏱ زمان پاسخگویی تا ۲۴ ساعت کاری\n"
+            "☎️ تلفن: 021-63002000\n"
+            "🌐 https://skppart.com/",
+            parse_mode="Markdown",
+            reply_markup=STUDENT_MAIN_KEYBOARD,
+        )
 
 
 # ====== یادآوری به اساتید ======
@@ -564,6 +607,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     await update.message.reply_text(
         MESSAGES["welcome"],
+        reply_markup=STUDENT_MAIN_KEYBOARD,
+    )
+    await update.message.reply_text(
+        "برای شروع دکمه زیر را بزنید:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
     )
     return STUDENT_PHONE
@@ -596,30 +643,14 @@ async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return STUDENT_QUESTION
 
 
-async def ask_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("selected_course", None)
-    context.user_data["pending_parts"] = []
-    context.user_data["submit_msg_id"] = None
-    try:
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=MESSAGES["ask_again_prompt"],
-            reply_markup=InlineKeyboardMarkup(build_course_keyboard()),
-        )
-    except Exception:
-        try:
-            await query.message.edit_text(MESSAGES["ask_again_prompt"], reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
-        except Exception:
-            pass
-    return STUDENT_COURSE
-
-
 async def start_register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    kb = ReplyKeyboardMarkup([[KeyboardButton("ارسال شماره", request_contact=True)]], one_time_keyboard=True, resize_keyboard=True)
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("ارسال شماره", request_contact=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+    )
     try:
         await context.bot.send_message(chat_id=query.from_user.id, text="لطفاً شماره تلفن خود را ارسال کنید.", reply_markup=kb)
     except Exception:
@@ -646,15 +677,23 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     save_state(state_data)
     context.user_data["phone"] = phone
     try:
-        await context.bot.send_message(chat_id=user.id, text=f"شماره شما ثبت شد: {phone}", reply_markup=ReplyKeyboardRemove())
-        await context.bot.send_message(chat_id=user.id, text="لطفاً دوره مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"✅ شماره شما ثبت شد: {phone}\n\nاز منوی پایین گزینه مورد نظر را انتخاب کنید:",
+            reply_markup=STUDENT_MAIN_KEYBOARD,
+        )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="لطفاً دوره مورد نظر را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(build_course_keyboard()),
+        )
     except Exception:
         pass
     return STUDENT_COURSE
 
 
 def _extract_part(msg) -> dict | None:
-    if msg.text:
+    if msg.text and msg.text not in MENU_BUTTONS:
         return {"type": "text", "text": msg.text}
     elif msg.photo:
         return {"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption or ""}
@@ -692,6 +731,9 @@ async def _send_part(bot, chat_id: int, part: dict, caption_prefix: str = "") ->
 
 async def receive_question_part(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     msg = update.message
+    if msg.text and msg.text in MENU_BUTTONS:
+        await menu_handler(update, context)
+        return STUDENT_QUESTION
     course = context.user_data.get("selected_course")
     if not course:
         await msg.reply_text(MESSAGES["need_course"])
@@ -783,7 +825,7 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
             await context.bot.send_message(
                 chat_id=user.id,
                 text=MESSAGES["ask_again_prompt"],
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(MESSAGES["ask_again_button"], callback_data="ask_again")]]),
+                reply_markup=STUDENT_MAIN_KEYBOARD,
             )
         except Exception:
             pass
@@ -951,6 +993,10 @@ async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text(
             MESSAGES["welcome"],
+            reply_markup=STUDENT_MAIN_KEYBOARD,
+        )
+        await query.message.reply_text(
+            "برای شروع دکمه زیر را بزنید:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
         )
     except Exception:
@@ -958,7 +1004,7 @@ async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(MESSAGES["unknown"])
+    await update.message.reply_text(MESSAGES["unknown"], reply_markup=STUDENT_MAIN_KEYBOARD)
 
 
 def main() -> None:
@@ -1020,7 +1066,13 @@ def main() -> None:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
-    app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
+
+    # ← منوی ثابت — باید قبل از teacher_reply باشه
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r"^(❓ سوال جدید|📋 وضعیت سوالم|📂 تاریخچه سوالات|ℹ️ راهنما)$"),
+        menu_handler,
+    ))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teacher_reply))
     app.add_handler(MessageHandler(filters.PHOTO, teacher_reply))
     app.add_handler(MessageHandler(filters.VIDEO, teacher_reply))
@@ -1030,7 +1082,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.ANIMATION, teacher_reply))
     app.add_handler(MessageHandler(filters.ALL, unknown))
 
-    # یادآوری هر ۶ ساعت
     if app.job_queue:
         app.job_queue.run_repeating(
             remind_unanswered,
