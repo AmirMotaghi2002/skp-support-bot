@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 # Fix UTF-8 encoding for Windows console
 if sys.stdout.encoding != 'utf-8':
@@ -28,40 +29,20 @@ from telegram.ext import (
 # ====== تنظیمات اولیه ======
 TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
-MEDIA_DIR = "media"  # پوشه برای ذخیره فایل‌های رسانه‌ای
-DEFAULT_GROUP_CHAT_ID = os.environ.get(
-    "TELEGRAM_GROUP_ID"
-)
+MEDIA_DIR = "media"
+DEFAULT_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_ID")
+ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS = set(int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit())
 
-# ایجاد پوشه رسانه اگر وجود ندارد
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 COURSES = [
-    "نقشه خوانی",
-    "نتظیم موتور",
-    "پارامتر خوانی",
-    "مالتی پلکس ایران خودرو",
-    "مالتی پلکس فرانسه",
-    "مالتی پلکس سایپا",
-    "کولر و تهویه مطبوع",
-    "استارت و دینام",
-    "هیوندا و کیا",
-    "ایسیو ۱",
-    "ایسیو ۲",
-    "تعمیرات نود مالتی پلکس",
-    "جک و لیفان",
-    "ریمپ با TNM",
-    "کاربری TNM",
-    "ایمو بلایزر و تعریف ریموت",
-    "وینولز",
-]
-
-BEST_5 = [
-    "نقشه خوانی",
-    "کولر و تهویه مطبوع",
-    "استارت و دینام",
-    "مالتی پلکس ایران خودرو",
-    "ایمو بلایزر و تعریف ریموت",
+    "نقشه خوانی", "نتظیم موتور", "پارامتر خوانی",
+    "مالتی پلکس ایران خودرو", "مالتی پلکس فرانسه", "مالتی پلکس سایپا",
+    "کولر و تهویه مطبوع", "استارت و دینام", "هیوندا و کیا",
+    "ایسیو ۱", "ایسیو ۲", "تعمیرات نود مالتی پلکس",
+    "جک و لیفان", "ریمپ با TNM", "کاربری TNM",
+    "ایمو بلایزر و تعریف ریموت", "وینولز",
 ]
 
 MESSAGES = {
@@ -79,15 +60,15 @@ MESSAGES = {
         "⏱ زمان پاسخگویی بسته به نوع سوال، حجم درخواست‌ها و زمان حضور اساتید ممکن است از چند دقیقه تا حداکثر ۲۴ ساعت کاری متغیر باشد.\n\n"
         "☎️ تلفن شرکت:\n021-63002000\n\n"
         "🌐 وب‌سایت:\nhttps://skppart.com/\n\n"
-        "از اعتماد شما به آکادمی SKP سپاسگزاریم و امیدواریم این سامانه تجربه‌ای سریع، تخصصی و کاربردی برای شما فراهم کند.\n\n"
+        "از اعتماد شما به آکادمی SKP سپاسگزاریم.\n\n"
     ),
-    "group_set": "گروه پشتیبانی ثبت شد. اکنون سوال‌ها به این گروه ارسال می‌شود.\nID گروه: {group_id}",
+    "group_set": "گروه پشتیبانی ثبت شد.\nID گروه: {group_id}",
     "setgroup_private": "این دستور را داخل گروه پشتیبانی اجرا کنید.",
-    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن (متن، عکس، ویدیو، ویس، فایل و غیره).",
+    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن.",
     "need_course": "ابتدا باید دوره را انتخاب کنید. /start را ارسال کنید.",
-    "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه پشتیبانی اجرا کنید.",
+    "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه اجرا کنید.",
     "question_sent": "سوال شما ثبت شد و به گروه اساتید ارسال شد. به زودی پاسخ دریافت می‌کنید.",
-    "question_send_failed": "ارسال سوال به گروه موفق نبود. ابتدا مطمئن شوید ربات در گروه اضافه شده و /setgroup اجرا شده است.",
+    "question_send_failed": "ارسال سوال به گروه موفق نبود.",
     "selected_answer": "✅ این سوال توسط {teacher} انتخاب شد. لطفاً جواب را در چت خصوصی با ربات ارسال کنید.",
     "teacher_private_question": (
         "شما سوال را برای پاسخ انتخاب کردید:\n"
@@ -96,21 +77,18 @@ MESSAGES = {
         "سوال: {question}\n\n"
         "لطفاً پاسخ خود را هم‌اکنون در این چت ارسال کنید."
     ),
-    "teacher_private_error": "خطا: ربات نمی‌تواند به استاد پیام خصوصی ارسال کند. لطفاً ابتدا ربات را در چت خصوصی استارت کنید.",
-    "not_related_post": "❌ این سوال توسط استاد ثبت شد که مربوط به دوره انتخاب‌شده نیست.",
-    "student_not_related": (
-        "سلام! یکی از اساتید اعلام کرده این سوال مربوط به دوره انتخاب‌شده نیست. "
-        "اگر می‌خواهید می‌توانید دوباره سوال خود را ارسال کنید یا دوره را تغییر دهید."
-    ),
-    "no_pending_question": "شما در حال حاضر سوالی برای پاسخ دادن ندارید. ابتدا در گروه سوال را انتخاب کنید.",
+    "teacher_private_error": "خطا: ربات نمی‌تواند به استاد پیام خصوصی ارسال کند.",
+    "not_related_post": "❌ این سوال مربوط به دوره انتخاب‌شده نیست.",
+    "student_not_related": "سلام! یکی از اساتید اعلام کرده این سوال مربوط به دوره انتخاب‌شده نیست.",
+    "no_pending_question": "شما در حال حاضر سوالی برای پاسخ دادن ندارید.",
     "question_not_found": "سوال پیدا نشد یا قبلاً بسته شده است.",
     "answer_sent": "پاسخ شما با موفقیت به دانشجو ارسال شد.",
-    "answer_send_failed": "خطا در ارسال پاسخ به دانشجو رخ داد. لطفاً مطمئن شوید دانشجو ربات را استارت کرده است.",
-    "unknown": "لطفاً از دستور /start برای شروع استفاده کنید یا سوال خود را پس از انتخاب دوره ارسال کنید.",
-    "new_question_title": "سوال جدید ثبت شد:",
+    "answer_send_failed": "خطا در ارسال پاسخ به دانشجو.",
+    "unknown": "لطفاً از دستور /start برای شروع استفاده کنید.",
     "question_answered_group": "✅ این سوال توسط {teacher} پاسخ داده شد.",
     "ask_again_button": "ارسال سوال جدید",
-    "ask_again_prompt": "در صورت داشتن سوال مجدد، دوره خود را انتخاب کنید یا سوال را ارسال کنید.",
+    "ask_again_prompt": "در صورت داشتن سوال مجدد، دوره خود را انتخاب کنید.",
+    "no_permission": "⛔ شما دسترسی به این دستور را ندارید.",
 }
 
 STUDENT_PHONE, STUDENT_COURSE, STUDENT_QUESTION = range(3)
@@ -162,13 +140,11 @@ def get_connection_status() -> tuple[bool, str | None]:
 def display_status(final: bool = False) -> None:
     clear_console()
     now = datetime.now()
-    start_time = status["start_time"] or now
-    uptime = format_timedelta(now - start_time)
-    connection_text = "✅ متصل" if status["connected"] else "❌ قطع"
+    uptime = format_timedelta(now - (status["start_time"] or now))
     print("============================================")
     print("    Telegram Support Bot - وضعیت اتصال")
     print("============================================")
-    print(f"وضعیت: {connection_text}")
+    print(f"وضعیت: {'✅ متصل' if status['connected'] else '❌ قطع'}")
     print(f"زمان اجرا: {uptime}")
     print(f"تعداد قطعی‌ها: {status['disconnect_count']}")
     print(f"آخرین بررسی: {status['last_check'].strftime('%Y-%m-%d %H:%M:%S') if status['last_check'] else '-'}")
@@ -177,7 +153,7 @@ def display_status(final: bool = False) -> None:
     print("--------------------------------------------")
     print("برای توقف ربات Ctrl+C را فشار دهید.")
     if final:
-        print("ربات متوقف شده است یا اتصال قطع است.")
+        print("ربات متوقف شده است.")
     sys.stdout.flush()
 
 
@@ -197,6 +173,7 @@ def status_monitor(stop_event: threading.Event) -> None:
             break
     display_status(final=True)
 
+
 state = {
     "group_chat_id": DEFAULT_GROUP_CHAT_ID,
     "questions": {},
@@ -208,9 +185,7 @@ def load_state() -> dict:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            logger.info("وضعیت قبلی بارگذاری شد.")
-            return data
+                return json.load(f)
         except Exception as e:
             logger.warning("بارگذاری وضعیت قبلی موفق نبود: %s", e)
     return state
@@ -224,38 +199,180 @@ def save_state(data: dict) -> None:
         logger.error("ذخیره وضعیت با خطا مواجه شد: %s", e)
 
 
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
 def build_course_keyboard() -> list:
-    buttons = []
-    for course in COURSES:
-        buttons.append([InlineKeyboardButton(course, callback_data=f"course:{course}")])
-    return buttons
+    return [[InlineKeyboardButton(course, callback_data=f"course:{course}")] for course in COURSES]
 
 
-async def download_media(context: ContextTypes.DEFAULT_TYPE, file_id: str, media_type: str) -> str:
-    """دانلود فایل رسانه‌ای و ذخیره آن"""
+# ====== آمار و گزارش‌گیری ======
+
+def compute_stats(state_data: dict) -> dict:
+    questions = state_data.get("questions", {})
+    by_status = defaultdict(int)
+    by_course = defaultdict(int)
+    by_teacher = defaultdict(lambda: {"answered": 0, "assigned": 0})
+    response_times = []
+    unanswered_old = []
+    now = datetime.now()
+
+    for qid, q in questions.items():
+        s = q.get("status", "open")
+        by_status[s] += 1
+        by_course[q.get("course", "نامشخص")] += 1
+
+        teacher = q.get("assigned_teacher_name")
+        if teacher:
+            by_teacher[teacher]["answered" if s == "answered" else "assigned"] += 1
+
+        if s == "answered" and q.get("created_at") and q.get("answered_at"):
+            try:
+                diff = (
+                    datetime.strptime(q["answered_at"], "%Y-%m-%d %H:%M:%S") -
+                    datetime.strptime(q["created_at"], "%Y-%m-%d %H:%M:%S")
+                ).total_seconds() / 60
+                response_times.append(diff)
+            except Exception:
+                pass
+
+        if s == "open" and q.get("created_at"):
+            try:
+                if (now - datetime.strptime(q["created_at"], "%Y-%m-%d %H:%M:%S")).total_seconds() > 86400:
+                    unanswered_old.append({
+                        "student": q.get("student_name", "نامشخص"),
+                        "course": q.get("course", "نامشخص"),
+                        "created_at": q["created_at"],
+                    })
+            except Exception:
+                pass
+
+    return {
+        "total": len(questions),
+        "by_status": dict(by_status),
+        "by_course": dict(by_course),
+        "by_teacher": {k: dict(v) for k, v in by_teacher.items()},
+        "avg_response_minutes": sum(response_times) / len(response_times) if response_times else None,
+        "unanswered_old": unanswered_old,
+    }
+
+
+def format_stats_message(stats: dict) -> str:
+    s = stats["by_status"]
+    lines = [
+        "📊 *آمار کلی سیستم پشتیبانی*\n",
+        f"📋 کل سوالات: *{stats['total']}*",
+        f"  ✅ پاسخ داده شده: {s.get('answered', 0)}",
+        f"  🔄 در انتظار پاسخ: {s.get('assigned', 0)}",
+        f"  🟡 باز: {s.get('open', 0)}",
+        f"  ❌ نامرتبط: {s.get('not_related', 0)}",
+    ]
+    if stats["avg_response_minutes"] is not None:
+        avg = stats["avg_response_minutes"]
+        avg_str = f"{avg:.0f} دقیقه" if avg < 60 else f"{avg/60:.1f} ساعت"
+        lines.append(f"\n⏱ میانگین زمان پاسخ: *{avg_str}*")
+    if stats["unanswered_old"]:
+        lines.append(f"\n⚠️ سوال‌های بدون پاسخ بیش از ۲۴ ساعت: *{len(stats['unanswered_old'])}*")
+    return "\n".join(lines)
+
+
+def format_report_message(stats: dict) -> str:
+    lines = ["📈 *گزارش تفصیلی*\n", "📚 *سوالات به تفکیک دوره:*"]
+    for course, count in sorted(stats["by_course"].items(), key=lambda x: x[1], reverse=True)[:10]:
+        lines.append(f"  • {course}: {count}")
+
+    lines.append("\n👨‍🏫 *عملکرد اساتید:*")
+    if stats["by_teacher"]:
+        for teacher, data in sorted(stats["by_teacher"].items(), key=lambda x: x[1]["answered"], reverse=True):
+            lines.append(f"  • {teacher}: {data['answered']} پاسخ / {data['assigned']} در بررسی")
+    else:
+        lines.append("  هنوز اطلاعاتی ثبت نشده.")
+
+    old = stats["unanswered_old"]
+    if old:
+        lines.append(f"\n⚠️ *سوال‌های بدون پاسخ بیش از ۲۴ ساعت ({len(old)} مورد):*")
+        for item in old[:5]:
+            lines.append(f"  • {item['student']} | {item['course']} | {item['created_at']}")
+        if len(old) > 5:
+            lines.append(f"  ... و {len(old) - 5} مورد دیگر")
+    return "\n".join(lines)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["no_permission"])
+        return
+    stats = compute_stats(load_state())
+    await update.message.reply_text(format_stats_message(stats), parse_mode="Markdown")
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["no_permission"])
+        return
+    stats = compute_stats(load_state())
+    await update.message.reply_text(format_report_message(stats), parse_mode="Markdown")
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["no_permission"])
+        return
+    state_data = load_state()
+    questions = state_data.get("questions", {})
+    if not questions:
+        await update.message.reply_text("هنوز سوالی ثبت نشده است.")
+        return
+    export_data = {
+        "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_questions": len(questions),
+        "questions": list(questions.values()),
+    }
+    export_path = os.path.join(MEDIA_DIR, f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     try:
-        file = await context.bot.get_file(file_id)
-        file_path = os.path.join(MEDIA_DIR, f"{uuid.uuid4()}_{media_type}")
-        logger.info("شروع دانلود %s (file_id: %s)", media_type, file_id)
-        await file.download_to_drive(file_path)
-        logger.info("دانلود موفق: %s", file_path)
-        return file_path
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+        await update.message.reply_document(
+            document=open(export_path, "rb"),
+            filename="questions_export.json",
+            caption=f"📤 خروجی کامل سوالات\n🕒 {export_data['exported_at']}\n📋 تعداد: {len(questions)}",
+        )
     except Exception as e:
-        logger.error("خطا در دانلود %s: %s", media_type, e)
-        return None
+        logger.error("خطا در export: %s", e)
+        await update.message.reply_text(f"خطا در تهیه خروجی: {e}")
 
+
+async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    questions = load_state().get("questions", {})
+    answered = [q for q in questions.values() if q.get("assigned_teacher_id") == user.id and q.get("status") == "answered"]
+    assigned = [q for q in questions.values() if q.get("assigned_teacher_id") == user.id and q.get("status") == "assigned"]
+    course_count = defaultdict(int)
+    for q in answered:
+        course_count[q.get("course", "نامشخص")] += 1
+    lines = [
+        f"📊 *آمار شخصی شما ({user.full_name})*\n",
+        f"✅ پاسخ داده شده: {len(answered)}",
+        f"🔄 در دست بررسی: {len(assigned)}",
+    ]
+    if course_count:
+        lines.append("\n📚 دوره‌های پرتکرار:")
+        for course, cnt in sorted(course_count.items(), key=lambda x: x[1], reverse=True)[:3]:
+            lines.append(f"  • {course}: {cnt}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ====== هندلرهای اصلی ======
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_chat.type != ChatType.PRIVATE:
-        await update.message.reply_text(
-            "برای استفاده از ربات پشتیبانی، لطفاً در چت خصوصی با من /start را ارسال کنید."
-        )
+        await update.message.reply_text("برای استفاده از ربات، لطفاً در چت خصوصی /start را ارسال کنید.")
         return ConversationHandler.END
-
-    logger.info("Received /start from user %s (%s)", update.effective_user.id if update.effective_user else None, update.effective_user.full_name if update.effective_user else None)
-    text = MESSAGES["welcome"]
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]])
-    await update.message.reply_text(text, reply_markup=keyboard)
+    await update.message.reply_text(
+        MESSAGES["welcome"],
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
+    )
     return STUDENT_PHONE
 
 
@@ -300,13 +417,12 @@ async def ask_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start_register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    logger.info("start_register pressed by %s", query.from_user.id if query.from_user else None)
     kb = ReplyKeyboardMarkup([[KeyboardButton("ارسال شماره", request_contact=True)]], one_time_keyboard=True, resize_keyboard=True)
     try:
-        await context.bot.send_message(chat_id=query.from_user.id, text="لطفاً شماره تلفن خود را ارسال کنید (ارسال از طریق دکمه یا تایپ شماره).", reply_markup=kb)
+        await context.bot.send_message(chat_id=query.from_user.id, text="لطفاً شماره تلفن خود را ارسال کنید.", reply_markup=kb)
     except Exception:
         try:
-            await query.message.edit_text("لطفاً شماره تلفن خود را ارسال کنید (ارسال از طریق دکمه یا تایپ شماره).")
+            await query.message.edit_text("لطفاً شماره تلفن خود را ارسال کنید.")
         except Exception:
             pass
     return STUDENT_PHONE
@@ -315,104 +431,83 @@ async def start_register_callback(update: Update, context: ContextTypes.DEFAULT_
 async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     phone = None
-    logger.info("receive_contact invoked by %s", user.id if user else None)
     if update.message.contact and update.message.contact.phone_number:
         phone = update.message.contact.phone_number
-    elif update.message.text:
-        txt = update.message.text.strip()
-        if any(ch.isdigit() for ch in txt):
-            phone = txt
+    elif update.message.text and any(ch.isdigit() for ch in update.message.text):
+        phone = update.message.text.strip()
 
     if not phone:
         await update.message.reply_text("شماره تلفن نامعتبر است. لطفاً مجدداً امتحان کنید.")
         return STUDENT_PHONE
 
     state_data = load_state()
-    users = state_data.get("users") or {}
-    users[str(user.id)] = users.get(str(user.id), {})
-    users[str(user.id)]["phone"] = phone
-    state_data["users"] = users
+    users = state_data.setdefault("users", {})
+    users.setdefault(str(user.id), {})["phone"] = phone
     save_state(state_data)
-
     context.user_data["phone"] = phone
+
     try:
         await context.bot.send_message(chat_id=user.id, text=f"شماره شما ثبت شد: {phone}", reply_markup=ReplyKeyboardRemove())
         await context.bot.send_message(chat_id=user.id, text="لطفاً دوره مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
     except Exception:
         pass
-
     return STUDENT_COURSE
+
+
+async def _send_media(bot, chat_id: int, media_type: str, file_id: str, caption: str) -> None:
+    """ارسال رسانه بر اساس نوع آن"""
+    handlers = {
+        "photo": bot.send_photo,
+        "video": bot.send_video,
+        "voice": bot.send_voice,
+        "document": bot.send_document,
+        "audio": bot.send_audio,
+        "animation": bot.send_animation,
+    }
+    send_fn = handlers.get(media_type)
+    if send_fn:
+        await send_fn(chat_id=chat_id, **{media_type: file_id}, caption=caption)
 
 
 async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     course = context.user_data.get("selected_course")
-    
-    logger.info("=== receive_question شروع ===")
-    logger.info("User: %s, Course: %s", user.id, course)
-    logger.info("Message attributes - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
-                bool(update.message.text), 
-                bool(update.message.photo), 
-                bool(update.message.video),
-                bool(update.message.voice), 
-                bool(update.message.document), 
-                bool(update.message.audio),
-                bool(update.message.animation))
-    
-    # متغیرها برای نوع رسانه
-    question_text = None
-    media_file_id = None
-    media_type = None
-    
-    # چک کردن نوع پیام
-    logger.info("Message type - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
-                bool(update.message.text), bool(update.message.photo), bool(update.message.video),
-                bool(update.message.voice), bool(update.message.document), bool(update.message.audio),
-                bool(update.message.animation))
-    
-    if update.message.text:
-        question_text = update.message.caption or "عکس ارسال شده"
-        media_file_id = update.message.photo[-1].file_id
-        media_type = "photo"
-    elif update.message.video:
-        question_text = update.message.caption or "ویدیو ارسال شده"
-        media_file_id = update.message.video.file_id
-        media_type = "video"
-    elif update.message.voice:
-        question_text = update.message.caption or "ویس ارسال شده"
-        media_file_id = update.message.voice.file_id
-        media_type = "voice"
-    elif update.message.document:
-        question_text = update.message.caption or "📎 فایل ارسال شده"
-        media_file_id = update.message.document.file_id
-        media_type = "document"
-    elif update.message.audio:
-        question_text = update.message.caption or "🎵 آهنگ ارسال شده"
-        media_file_id = update.message.audio.file_id
-        media_type = "audio"
-    elif update.message.animation:
-        question_text = update.message.caption or "🎬 GIF ارسال شده"
-        media_file_id = update.message.animation.file_id
-        media_type = "animation"
+    msg = update.message
+
+    if msg.text:
+        question_text, media_file_id, media_type = msg.text, None, None
+    elif msg.photo:
+        question_text, media_file_id, media_type = msg.caption or "عکس ارسال شده", msg.photo[-1].file_id, "photo"
+    elif msg.video:
+        question_text, media_file_id, media_type = msg.caption or "ویدیو ارسال شده", msg.video.file_id, "video"
+    elif msg.voice:
+        question_text, media_file_id, media_type = msg.caption or "ویس ارسال شده", msg.voice.file_id, "voice"
+    elif msg.document:
+        question_text, media_file_id, media_type = msg.caption or "فایل ارسال شده", msg.document.file_id, "document"
+    elif msg.audio:
+        question_text, media_file_id, media_type = msg.caption or "آهنگ ارسال شده", msg.audio.file_id, "audio"
+    elif msg.animation:
+        question_text, media_file_id, media_type = msg.caption or "GIF ارسال شده", msg.animation.file_id, "animation"
     else:
-        await update.message.reply_text("لطفاً متن، عکس، ویدیو، ویس، فایل یا رسانه دیگری ارسال کنید.")
+        await msg.reply_text("لطفاً متن، عکس، ویدیو، ویس یا فایل ارسال کنید.")
         return STUDENT_QUESTION
 
     if not course:
-        await update.message.reply_text(MESSAGES["need_course"])
+        await msg.reply_text(MESSAGES["need_course"])
         return ConversationHandler.END
 
     state_data = load_state()
     group_chat_id = state_data.get("group_chat_id") or DEFAULT_GROUP_CHAT_ID
-    if group_chat_id is None:
-        await update.message.reply_text(MESSAGES["group_not_set"])
+    if not group_chat_id:
+        await msg.reply_text(MESSAGES["group_not_set"])
         return ConversationHandler.END
 
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # رسانه‌ها را بدون دانلود ذخیره کن - فقط file_id کافی است
-    # (Telegram خود file رو cache کرده، دانلود لازم نیست)
+
+    users = state_data.get("users", {})
+    phone = (users.get(str(user.id)) or {}).get("phone") or context.user_data.get("phone")
+
     state_data["questions"][question_id] = {
         "student_id": user.id,
         "student_name": user.full_name,
@@ -420,6 +515,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "question": question_text,
         "status": "open",
         "created_at": now,
+        "answered_at": None,
         "group_message_id": None,
         "assigned_teacher_id": None,
         "assigned_teacher_name": None,
@@ -427,18 +523,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "media_file_id": media_file_id,
         "media_type": media_type,
     }
-
-    keyboard = [
-        [InlineKeyboardButton("✅ پاسخ می‌دهم", callback_data=f"answer:{question_id}")],
-        [InlineKeyboardButton("❌ مربوط به این دوره نیست", callback_data=f"not_related:{question_id}")],
-    ]
-
-    phone = None
-    users = state_data.get("users") or {}
-    if users.get(str(user.id)) and users.get(str(user.id)).get("phone"):
-        phone = users.get(str(user.id))["phone"]
-    elif context.user_data.get("phone"):
-        phone = context.user_data.get("phone")
 
     group_message = (
         f"سوال جدید ثبت شد:\n"
@@ -448,56 +532,32 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"🕒 زمان: {now}\n\n"
         f"سوال: {question_text}"
     )
+    keyboard = [
+        [InlineKeyboardButton("✅ پاسخ می‌دهم", callback_data=f"answer:{question_id}")],
+        [InlineKeyboardButton("❌ مربوط به این دوره نیست", callback_data=f"not_related:{question_id}")],
+    ]
 
     try:
-        # ارسال پیام متنی و سپس رسانه
-        msg = await context.bot.send_message(
-            chat_id=group_chat_id,
-            text=group_message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        state_data["questions"][question_id]["group_message_id"] = msg.message_id
-        
-        # اگر رسانه وجود دارد، آن را هم ارسال کن
-        if media_file_id and media_type:
-            logger.info("ارسال رسانه: type=%s, file_id=%s", media_type, media_file_id)
+        sent = await context.bot.send_message(chat_id=group_chat_id, text=group_message, reply_markup=InlineKeyboardMarkup(keyboard))
+        state_data["questions"][question_id]["group_message_id"] = sent.message_id
+        if media_file_id:
             try:
-                if media_type == "photo":
-                    await context.bot.send_photo(chat_id=group_chat_id, photo=media_file_id, caption="📷 عکس مربوط به سوال")
-                elif media_type == "video":
-                    try:
-                        await context.bot.send_video(chat_id=group_chat_id, video=media_file_id, caption="🎥 ویدیو مربوط به سوال")
-                    except Exception as ve:
-                        logger.error("خطا در ارسال ویدیو به گروه: %s", ve)
-                        raise
-                elif media_type == "voice":
-                    await context.bot.send_voice(chat_id=group_chat_id, voice=media_file_id, caption="🎙️ ویس مربوط به سوال")
-                elif media_type == "document":
-                    await context.bot.send_document(chat_id=group_chat_id, document=media_file_id, caption="📎 فایل مربوط به سوال")
-                elif media_type == "audio":
-                    await context.bot.send_audio(chat_id=group_chat_id, audio=media_file_id, caption="🎵 آهنگ مربوط به سوال")
-                elif media_type == "animation":
-                    await context.bot.send_animation(chat_id=group_chat_id, animation=media_file_id, caption="🎬 GIF مربوط به سوال")
+                await _send_media(context.bot, group_chat_id, media_type, media_file_id, f"رسانه مربوط به سوال")
             except Exception as e:
                 logger.error("خطا در ارسال رسانه به گروه: %s", e)
-        
         save_state(state_data)
-        await update.message.reply_text(MESSAGES["question_sent"])
-
+        await msg.reply_text(MESSAGES["question_sent"])
         try:
             await context.bot.send_message(
                 chat_id=user.id,
                 text=MESSAGES["ask_again_prompt"],
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(MESSAGES["ask_again_button"], callback_data="ask_again")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(MESSAGES["ask_again_button"], callback_data="ask_again")]]),
             )
         except Exception:
             pass
-
     except Exception as e:
         logger.error("خطا در ارسال سوال به گروه: %s", e)
-        await update.message.reply_text(MESSAGES["question_send_failed"])
+        await msg.reply_text(MESSAGES["question_send_failed"])
 
     return ConversationHandler.END
 
@@ -505,16 +565,13 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    data = query.data.split(":", 1)
-    action = data[0]
-    question_id = data[1]
+    action, question_id = query.data.split(":", 1)
     state_data = load_state()
     question = state_data["questions"].get(question_id)
 
     if not question:
         await query.edit_message_text("این سوال قبلاً حذف یا موجود نیست.")
         return
-
     if question["status"] != "open":
         await query.answer("این سوال قبلاً بررسی شده است.", show_alert=True)
         return
@@ -526,11 +583,7 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         question["assigned_teacher_name"] = teacher.full_name
         state_data["teacher_pending"][str(teacher.id)] = question_id
         save_state(state_data)
-
-        await query.edit_message_text(
-            query.message.text + "\n\n" + MESSAGES["selected_answer"].format(teacher=teacher.full_name)
-        )
-
+        await query.edit_message_text(query.message.text + "\n\n" + MESSAGES["selected_answer"].format(teacher=teacher.full_name))
         try:
             await context.bot.send_message(
                 chat_id=teacher.id,
@@ -540,106 +593,62 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     question=question["question"],
                 ),
             )
-            
-            # ارسال رسانه به استاد اگر موجود باشد
-            if question.get("media_file_id") and question.get("media_type"):
-                try:
-                    media_type = question["media_type"]
-                    media_file_id = question["media_file_id"]
-                    
-                    if media_type == "photo":
-                        await context.bot.send_photo(chat_id=teacher.id, photo=media_file_id, caption="📷 عکس سوال")
-                    elif media_type == "video":
-                        try:
-                            await context.bot.send_video(chat_id=teacher.id, video=media_file_id, caption="🎥 ویدیو سوال")
-                        except Exception as ve:
-                            logger.error("خطا در ارسال ویدیو به استاد: %s", ve)
-                            raise
-                    elif media_type == "voice":
-                        await context.bot.send_voice(chat_id=teacher.id, voice=media_file_id, caption="🎙️ ویس سوال")
-                    elif media_type == "document":
-                        await context.bot.send_document(chat_id=teacher.id, document=media_file_id, caption="📎 فایل سوال")
-                    elif media_type == "audio":
-                        await context.bot.send_audio(chat_id=teacher.id, audio=media_file_id, caption="🎵 آهنگ سوال")
-                    elif media_type == "animation":
-                        await context.bot.send_animation(chat_id=teacher.id, animation=media_file_id, caption="🎬 GIF سوال")
-                except Exception as e:
-                    logger.error("خطا در ارسال رسانه به استاد: %s", e)
-                    
+            if question.get("media_file_id"):
+                await _send_media(context.bot, teacher.id, question["media_type"], question["media_file_id"], "رسانه سوال")
         except Exception as e:
-            logger.error("خطا در ارسال پیام خصوصی به استاد: %s", e)
+            logger.error("خطا در ارسال پیام به استاد: %s", e)
             await query.message.reply_text(MESSAGES["teacher_private_error"])
 
     elif action == "not_related":
         question["status"] = "not_related"
         save_state(state_data)
-
-        await query.edit_message_text(
-            query.message.text + "\n\n" + MESSAGES["not_related_post"]
-        )
-
+        await query.edit_message_text(query.message.text + "\n\n" + MESSAGES["not_related_post"])
         try:
-            await context.bot.send_message(
-                chat_id=question["student_id"],
-                text=MESSAGES["student_not_related"],
-            )
+            await context.bot.send_message(chat_id=question["student_id"], text=MESSAGES["student_not_related"])
         except Exception as e:
-            logger.error("ارسال پیام به دانشجو هنگام not_related با خطا مواجه شد: %s", e)
+            logger.error("خطا در ارسال پیام not_related به دانشجو: %s", e)
 
 
 async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     teacher_id = str(update.effective_user.id)
     state_data = load_state()
     pending = state_data["teacher_pending"].get(teacher_id)
-
     if not pending:
         await update.message.reply_text(MESSAGES["no_pending_question"])
         return
 
-    # تشخیص نوع پاسخ (متن یا رسانه)
-    answer_text = None
-    answer_media_file_id = None
-    answer_media_type = None
-    
-    if update.message.text:
-        answer_text = update.message.text.strip()
-    elif update.message.photo:
-        answer_text = update.message.caption or "📷 عکس پاسخ"
-        answer_media_file_id = update.message.photo[-1].file_id
-        answer_media_type = "photo"
-    elif update.message.video:
-        answer_text = update.message.caption or "🎥 ویدیو پاسخ"
-        answer_media_file_id = update.message.video.file_id
-        answer_media_type = "video"
-    elif update.message.voice:
-        answer_text = update.message.caption or "🎙️ ویس پاسخ"
-        answer_media_file_id = update.message.voice.file_id
-        answer_media_type = "voice"
-    elif update.message.audio:
-        answer_text = update.message.caption or "🎵 آهنگ پاسخ"
-        answer_media_file_id = update.message.audio.file_id
-        answer_media_type = "audio"
-    elif update.message.document:
-        answer_text = update.message.caption or "📎 فایل پاسخ"
-        answer_media_file_id = update.message.document.file_id
-        answer_media_type = "document"
-    elif update.message.animation:
-        answer_text = update.message.caption or "🎬 GIF پاسخ"
-        answer_media_file_id = update.message.animation.file_id
-        answer_media_type = "animation"
+    msg = update.message
+    if msg.text:
+        answer_text, answer_media_file_id, answer_media_type = msg.text.strip(), None, None
+    elif msg.photo:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "عکس پاسخ", msg.photo[-1].file_id, "photo"
+    elif msg.video:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "ویدیو پاسخ", msg.video.file_id, "video"
+    elif msg.voice:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "ویس پاسخ", msg.voice.file_id, "voice"
+    elif msg.audio:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "آهنگ پاسخ", msg.audio.file_id, "audio"
+    elif msg.document:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "فایل پاسخ", msg.document.file_id, "document"
+    elif msg.animation:
+        answer_text, answer_media_file_id, answer_media_type = msg.caption or "GIF پاسخ", msg.animation.file_id, "animation"
     else:
-        await update.message.reply_text("لطفاً متن یا رسانه‌ای برای پاسخ ارسال کنید.")
+        await msg.reply_text("لطفاً متن یا رسانه‌ای برای پاسخ ارسال کنید.")
         return
 
     question = state_data["questions"].get(pending)
     if not question:
-        await update.message.reply_text(MESSAGES["question_not_found"])
+        await msg.reply_text(MESSAGES["question_not_found"])
         return
 
-    question["status"] = "answered"
-    question["answer"] = answer_text
-    question["answer_media_file_id"] = answer_media_file_id
-    question["answer_media_type"] = answer_media_type
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    question.update({
+        "status": "answered",
+        "answer": answer_text,
+        "answered_at": now,
+        "answer_media_file_id": answer_media_file_id,
+        "answer_media_type": answer_media_type,
+    })
     state_data["teacher_pending"].pop(teacher_id, None)
     save_state(state_data)
 
@@ -649,39 +658,19 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"👨‍🏫 استاد: {question['assigned_teacher_name']}\n\n"
         f"پاسخ: {answer_text}"
     )
+    post_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("سوالی ندارم", callback_data=f"no_more:{pending}")],
+        [InlineKeyboardButton("باز سوال دارم", callback_data=f"ask_more:{pending}")],
+    ])
 
     try:
-        post_keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("سوالی ندارم", callback_data=f"no_more:{pending}")],
-                [InlineKeyboardButton("باز سوال دارم", callback_data=f"ask_more:{pending}")],
-            ]
-        )
         await context.bot.send_message(chat_id=question["student_id"], text=student_message, reply_markup=post_keyboard)
-        
-        # ارسال رسانه‌ی پاسخ اگر موجود باشد
-        if answer_media_file_id and answer_media_type:
-            logger.info("ارسال رسانه‌ی پاسخ: type=%s, file_id=%s", answer_media_type, answer_media_file_id)
-            try:
-                if answer_media_type == "photo":
-                    await context.bot.send_photo(chat_id=question["student_id"], photo=answer_media_file_id, caption="📷 عکس پاسخ")
-                elif answer_media_type == "video":
-                    await context.bot.send_video(chat_id=question["student_id"], video=answer_media_file_id, caption="🎥 ویدیو پاسخ")
-                elif answer_media_type == "voice":
-                    await context.bot.send_voice(chat_id=question["student_id"], voice=answer_media_file_id, caption="🎙️ ویس پاسخ")
-                elif answer_media_type == "audio":
-                    await context.bot.send_audio(chat_id=question["student_id"], audio=answer_media_file_id, caption="🎵 آهنگ پاسخ")
-                elif answer_media_type == "document":
-                    await context.bot.send_document(chat_id=question["student_id"], document=answer_media_file_id, caption="📎 فایل پاسخ")
-                elif answer_media_type == "animation":
-                    await context.bot.send_animation(chat_id=question["student_id"], animation=answer_media_file_id, caption="🎬 GIF پاسخ")
-            except Exception as e:
-                logger.error("خطا در ارسال رسانه‌ی پاسخ به دانشجو: %s", e)
-        
-        await update.message.reply_text(MESSAGES["answer_sent"])
+        if answer_media_file_id:
+            await _send_media(context.bot, question["student_id"], answer_media_type, answer_media_file_id, "رسانه پاسخ")
+        await msg.reply_text(MESSAGES["answer_sent"])
     except Exception as e:
-        logger.error("ارسال پاسخ استاد به دانشجو با خطا مواجه شد: %s", e)
-        await update.message.reply_text(MESSAGES["answer_send_failed"])
+        logger.error("خطا در ارسال پاسخ به دانشجو: %s", e)
+        await msg.reply_text(MESSAGES["answer_send_failed"])
 
     group_chat_id = state_data.get("group_chat_id") or DEFAULT_GROUP_CHAT_ID
     if group_chat_id and question.get("group_message_id"):
@@ -689,21 +678,16 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await context.bot.edit_message_text(
                 chat_id=group_chat_id,
                 message_id=question["group_message_id"],
-                text=(
-                    f"{question['question']}\n\n"
-                    + MESSAGES["question_answered_group"].format(teacher=question["assigned_teacher_name"])
-                ),
+                text=question["question"] + "\n\n" + MESSAGES["question_answered_group"].format(teacher=question["assigned_teacher_name"]),
             )
         except Exception as e:
-            logger.warning("به‌روزرسانی پیام گروه پس از پاسخ با خطا مواجه شد: %s", e)
+            logger.warning("خطا در به‌روزرسانی پیام گروه: %s", e)
 
 
 async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    data = query.data.split(":", 1)
-    action = data[0]
-    question_id = data[1]
+    action, question_id = query.data.split(":", 1)
     state_data = load_state()
     question = state_data["questions"].get(question_id)
     if not question:
@@ -724,17 +708,20 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.message.reply_text("از بازخورد شما سپاسگزاریم.")
             await context.bot.send_message(
                 chat_id=question["student_id"],
-                text="اگر می‌خواهید دوباره از ربات استفاده کنید، دکمه زیر را بزنید:",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("استارت مجدد ربات", callback_data="restart_bot")]]
-                ),
+                text="اگر می‌خواهید دوباره از ربات استفاده کنید:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("استارت مجدد ربات", callback_data="restart_bot")]]),
             )
         except Exception as e:
             logger.error("خطا در ارسال نظرسنجی: %s", e)
         return ConversationHandler.END
+
     elif action == "ask_more":
         try:
-            await context.bot.send_message(chat_id=question["student_id"], text="دوره مورد نظر رو انتخاب کنید:", reply_markup=InlineKeyboardMarkup(build_course_keyboard()))
+            await context.bot.send_message(
+                chat_id=question["student_id"],
+                text="دوره مورد نظر رو انتخاب کنید:",
+                reply_markup=InlineKeyboardMarkup(build_course_keyboard()),
+            )
         except Exception:
             pass
         return STUDENT_COURSE
@@ -746,23 +733,13 @@ async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.reply_text(
             MESSAGES["welcome"],
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
-            ),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
         )
     except Exception:
         pass
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.warning("Unknown message - text: %s, photo: %s, video: %s, voice: %s, document: %s, audio: %s, animation: %s",
-                   bool(update.message.text) if update.message else False,
-                   bool(update.message.photo) if update.message else False,
-                   bool(update.message.video) if update.message else False,
-                   bool(update.message.voice) if update.message else False,
-                   bool(update.message.document) if update.message else False,
-                   bool(update.message.audio) if update.message else False,
-                   bool(update.message.animation) if update.message else False)
     await update.message.reply_text(MESSAGES["unknown"])
 
 
@@ -800,10 +777,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("mystats", mystats_command))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
-    # استاد می‌تونه متن یا رسانه‌ای برای پاسخ بفرستد
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teacher_reply))
     app.add_handler(MessageHandler(filters.PHOTO, teacher_reply))
     app.add_handler(MessageHandler(filters.VIDEO, teacher_reply))
