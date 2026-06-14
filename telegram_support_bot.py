@@ -44,11 +44,10 @@ COURSES = [
 
 STUDENT_MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["❓ سوال جدید", "📋 وضعیت سوالم"],
-        ["📂 تاریخچه سوالات", "ℹ️ راهنما"],
+        ...
     ],
     resize_keyboard=True,
-    persistent=True,
+    is_persistent=True,
 )
 
 MESSAGES = {
