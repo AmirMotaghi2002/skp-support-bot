@@ -48,7 +48,7 @@ STUDENT_MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📂 تاریخچه سوالات", "ℹ️ راهنما"],
     ],
     resize_keyboard=True,
-    persistent=True,
+    is_persistent=True,
 )
 
 MESSAGES = {
