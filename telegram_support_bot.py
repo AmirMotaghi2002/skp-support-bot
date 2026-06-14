@@ -19,6 +19,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     ConversationHandler,
+    JobQueue,
     MessageHandler,
     filters,
 )
@@ -29,6 +30,7 @@ MEDIA_DIR = "media"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_ID")
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "162879965")
 ADMIN_IDS = set(int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit())
+REMINDER_INTERVAL_HOURS = 6
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
@@ -91,10 +93,25 @@ MESSAGES = {
     "ask_again_prompt": "در صورت داشتن سوال مجدد، دوره خود را انتخاب کنید.",
     "no_permission": "⛔ شما دسترسی به این دستور را ندارید.",
     "no_parts": "هنوز پیامی ارسال نکرده‌اید. ابتدا سوال خود را بنویسید.",
+    # وضعیت سوال
+    "status_open": "🟡 در انتظار بررسی استاد",
+    "status_assigned": "🔄 استاد در حال بررسی",
+    "status_answered": "✅ پاسخ داده شده",
+    "status_not_related": "❌ نامرتبط با دوره",
+    # یادآوری
+    "reminder_teacher": (
+        "⏰ یادآوری: شما {count} سوال بی‌پاسخ دارید که بیش از {hours} ساعت منتظر مانده‌اند:\n\n{list}"
+    ),
+    # اطلاعیه
+    "announce_prompt": "متن اطلاعیه‌ای که می‌خواهید به همه دانشجوها ارسال شود را بنویسید:",
+    "announce_sent": "📢 اطلاعیه با موفقیت به {count} دانشجو ارسال شد.",
+    "announce_cancelled": "ارسال اطلاعیه لغو شد.",
+    "announce_confirm": "📢 پیش‌نمایش اطلاعیه:\n\n{text}\n\nآیا ارسال شود؟",
 }
 
 SUBMIT_QUESTION_BTN = "submit_question"
 STUDENT_PHONE, STUDENT_COURSE, STUDENT_QUESTION = range(3)
+ANNOUNCE_TEXT, ANNOUNCE_CONFIRM = range(3, 5)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -212,6 +229,15 @@ def build_course_keyboard() -> list:
 
 def build_submit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("📨 ارسال سوال", callback_data=SUBMIT_QUESTION_BTN)]])
+
+
+def get_status_label(status_key: str) -> str:
+    return {
+        "open": MESSAGES["status_open"],
+        "assigned": MESSAGES["status_assigned"],
+        "answered": MESSAGES["status_answered"],
+        "not_related": MESSAGES["status_not_related"],
+    }.get(status_key, "نامشخص")
 
 
 # ====== آمار و گزارش‌گیری ======
@@ -363,6 +389,226 @@ async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+# ====== وضعیت سوال ======
+
+async def mystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """دستور /mystatus — نمایش وضعیت آخرین سوالات دانشجو"""
+    user = update.effective_user
+    state_data = load_state()
+    questions = state_data.get("questions", {})
+
+    my_questions = [
+        q for q in questions.values()
+        if q.get("student_id") == user.id
+    ]
+    my_questions.sort(key=lambda q: q.get("created_at", ""), reverse=True)
+
+    if not my_questions:
+        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.")
+        return
+
+    lines = ["📋 *وضعیت سوالات شما (۵ سوال آخر):*\n"]
+    for i, q in enumerate(my_questions[:5], 1):
+        label = get_status_label(q.get("status", "open"))
+        summary = q.get("question", "")[:50]
+        if len(q.get("question", "")) > 50:
+            summary += "..."
+        lines.append(
+            f"{i}. 📚 {q.get('course', '')}\n"
+            f"   💬 {summary}\n"
+            f"   وضعیت: {label}\n"
+            f"   🕒 {q.get('created_at', '')}"
+        )
+        if q.get("status") == "answered" and q.get("answer"):
+            lines.append(f"   ✅ پاسخ: {q['answer'][:60]}{'...' if len(q['answer']) > 60 else ''}")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ====== تاریخچه سوالات ======
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """دستور /history — تاریخچه کامل سوالات دانشجو"""
+    user = update.effective_user
+    state_data = load_state()
+    questions = state_data.get("questions", {})
+
+    my_questions = sorted(
+        [q for q in questions.values() if q.get("student_id") == user.id],
+        key=lambda q: q.get("created_at", ""),
+        reverse=True,
+    )
+
+    if not my_questions:
+        await update.message.reply_text("شما هنوز سوالی ثبت نکرده‌اید.")
+        return
+
+    total = len(my_questions)
+    answered = sum(1 for q in my_questions if q.get("status") == "answered")
+    open_q = sum(1 for q in my_questions if q.get("status") == "open")
+
+    lines = [
+        f"📂 *تاریخچه سوالات شما*\n",
+        f"📋 کل: {total} | ✅ پاسخ داده: {answered} | 🟡 در انتظار: {open_q}\n",
+        "─────────────────────",
+    ]
+
+    for i, q in enumerate(my_questions[:10], 1):
+        label = get_status_label(q.get("status", "open"))
+        summary = q.get("question", "")[:40]
+        if len(q.get("question", "")) > 40:
+            summary += "..."
+        teacher = q.get("assigned_teacher_name")
+        lines.append(
+            f"\n*{i}.* 📚 {q.get('course', '')}\n"
+            f"   💬 {summary}\n"
+            f"   {label}"
+            + (f" — 👨‍🏫 {teacher}" if teacher else "")
+            + f"\n   🕒 {q.get('created_at', '')}"
+        )
+
+    if total > 10:
+        lines.append(f"\n_... و {total - 10} سوال قدیمی‌تر_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ====== یادآوری به اساتید ======
+
+async def remind_unanswered(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """هر ۶ ساعت یه بار سوالات بی‌پاسخ رو به اساتیدی که سوال دارن یادآوری می‌کنه"""
+    state_data = load_state()
+    questions = state_data.get("questions", {})
+    now = datetime.now()
+    threshold_hours = REMINDER_INTERVAL_HOURS
+
+    # پیدا کردن سوالات open که بیش از threshold_hours ساعت منتظرند
+    old_open = []
+    for qid, q in questions.items():
+        if q.get("status") == "open" and q.get("created_at"):
+            try:
+                created = datetime.strptime(q["created_at"], "%Y-%m-%d %H:%M:%S")
+                hours_waiting = (now - created).total_seconds() / 3600
+                if hours_waiting >= threshold_hours:
+                    old_open.append(q)
+            except Exception:
+                pass
+
+    if not old_open:
+        return
+
+    # ارسال یادآوری به گروه
+    state_data = load_state()
+    group_chat_id = state_data.get("group_chat_id") or DEFAULT_GROUP_CHAT_ID
+    if not group_chat_id:
+        return
+
+    lines = [f"⏰ *یادآوری: {len(old_open)} سوال بی‌پاسخ*\n"]
+    for i, q in enumerate(old_open[:10], 1):
+        try:
+            created = datetime.strptime(q["created_at"], "%Y-%m-%d %H:%M:%S")
+            hours_waiting = int((now - created).total_seconds() / 3600)
+        except Exception:
+            hours_waiting = "؟"
+        lines.append(
+            f"{i}. 👨‍🎓 {q.get('student_name', '؟')} | "
+            f"📚 {q.get('course', '؟')} | "
+            f"⏱ {hours_waiting} ساعت منتظر"
+        )
+    if len(old_open) > 10:
+        lines.append(f"\n... و {len(old_open) - 10} سوال دیگر")
+
+    try:
+        await context.bot.send_message(
+            chat_id=group_chat_id,
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+        logger.info("یادآوری برای %d سوال بی‌پاسخ ارسال شد.", len(old_open))
+    except Exception as e:
+        logger.error("خطا در ارسال یادآوری: %s", e)
+
+
+# ====== اطلاعیه به همه دانشجوها ======
+
+async def announce_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دستور /announce — شروع فرآیند ارسال اطلاعیه (فقط ادمین)"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["no_permission"])
+        return ConversationHandler.END
+
+    await update.message.reply_text(MESSAGES["announce_prompt"])
+    return ANNOUNCE_TEXT
+
+
+async def announce_receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت متن اطلاعیه و نمایش پیش‌نمایش"""
+    context.user_data["announce_text"] = update.message.text
+    await update.message.reply_text(
+        MESSAGES["announce_confirm"].format(text=update.message.text),
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ بله، ارسال شود", callback_data="announce_yes"),
+                InlineKeyboardButton("❌ لغو", callback_data="announce_no"),
+            ]
+        ]),
+        parse_mode="Markdown",
+    )
+    return ANNOUNCE_CONFIRM
+
+
+async def announce_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """تأیید یا لغو ارسال اطلاعیه"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "announce_no":
+        await query.message.edit_text(MESSAGES["announce_cancelled"])
+        context.user_data.pop("announce_text", None)
+        return ConversationHandler.END
+
+    text = context.user_data.pop("announce_text", None)
+    if not text:
+        await query.message.edit_text("خطا: متن اطلاعیه یافت نشد.")
+        return ConversationHandler.END
+
+    state_data = load_state()
+    users = state_data.get("users", {})
+
+    # جمع‌آوری آی‌دی همه دانشجوهایی که حداقل یک سوال ثبت کردند
+    student_ids = set()
+    for q in state_data.get("questions", {}).values():
+        sid = q.get("student_id")
+        if sid:
+            student_ids.add(sid)
+    # همچنین کاربرانی که شماره ثبت کردند
+    for uid in users:
+        try:
+            student_ids.add(int(uid))
+        except Exception:
+            pass
+
+    await query.message.edit_text(f"⏳ در حال ارسال به {len(student_ids)} نفر...")
+
+    sent_count = 0
+    announce_message = f"📢 *اطلاعیه آکادمی SKP*\n\n{text}"
+    for sid in student_ids:
+        try:
+            await context.bot.send_message(chat_id=sid, text=announce_message, parse_mode="Markdown")
+            sent_count += 1
+        except Exception as e:
+            logger.warning("خطا در ارسال اطلاعیه به %s: %s", sid, e)
+
+    await query.message.edit_text(MESSAGES["announce_sent"].format(count=sent_count))
+    return ConversationHandler.END
+
+
+async def announce_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(MESSAGES["announce_cancelled"])
+    return ConversationHandler.END
+
+
 # ====== هندلرهای اصلی ======
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -393,17 +639,14 @@ async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     course = query.data.split(":", 1)[1]
     context.user_data["selected_course"] = course
     context.user_data["pending_parts"] = []
-    context.user_data["submit_msg_id"] = None  # ← ID پیام دکمه ارسال
+    context.user_data["submit_msg_id"] = None
 
     await query.message.edit_text(MESSAGES["course_selected"].format(course=course))
-
-    # ارسال دکمه «ارسال سوال» به عنوان یک پیام جداگانه و ثابت
     sent = await query.message.reply_text(
         "⬇️ پیام‌های خود را ارسال کن، سپس دکمه زیر را بزن:",
         reply_markup=build_submit_keyboard(),
     )
     context.user_data["submit_msg_id"] = sent.message_id
-
     return STUDENT_QUESTION
 
 
@@ -505,7 +748,6 @@ async def _send_part(bot, chat_id: int, part: dict, caption_prefix: str = "") ->
 
 
 async def receive_question_part(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """هر پیام کاربر رو به لیست pending_parts اضافه می‌کنه — بدون دکمه جدید"""
     msg = update.message
     course = context.user_data.get("selected_course")
 
@@ -520,13 +762,11 @@ async def receive_question_part(update: Update, context: ContextTypes.DEFAULT_TY
 
     parts = context.user_data.setdefault("pending_parts", [])
     parts.append(part)
-
     await msg.reply_text(MESSAGES["part_received"].format(index=len(parts)))
     return STUDENT_QUESTION
 
 
 async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """با زدن دکمه ارسال، دکمه مخفی میشه و سوال به گروه فرستاده میشه"""
     query = update.callback_query
     await query.answer()
     user = update.effective_user
@@ -541,7 +781,6 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
         await query.message.reply_text(MESSAGES["need_course"])
         return ConversationHandler.END
 
-    # ← مخفی کردن دکمه با ویرایش پیام
     try:
         await query.message.edit_text("⏳ در حال ارسال سوال...")
     except Exception:
@@ -607,7 +846,6 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("selected_course", None)
         context.user_data["submit_msg_id"] = None
 
-        # ← تأیید نهایی روی همان پیام دکمه
         try:
             await query.message.edit_text(MESSAGES["question_sent"].format(count=len(parts)))
         except Exception:
@@ -815,6 +1053,7 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # ====== ConversationHandler اصلی (دانشجو) ======
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -842,7 +1081,22 @@ def main() -> None:
         fallbacks=[CommandHandler("start", start)],
     )
 
+    # ====== ConversationHandler اطلاعیه (ادمین) ======
+    announce_handler = ConversationHandler(
+        entry_points=[CommandHandler("announce", announce_command)],
+        states={
+            ANNOUNCE_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, announce_receive_text),
+            ],
+            ANNOUNCE_CONFIRM: [
+                CallbackQueryHandler(announce_confirm_callback, pattern=r"^announce_(yes|no)$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", announce_cancel)],
+    )
+
     app.add_handler(conv_handler)
+    app.add_handler(announce_handler)
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
@@ -850,6 +1104,8 @@ def main() -> None:
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("mystats", mystats_command))
+    app.add_handler(CommandHandler("mystatus", mystatus_command))
+    app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
@@ -861,6 +1117,13 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, teacher_reply))
     app.add_handler(MessageHandler(filters.ANIMATION, teacher_reply))
     app.add_handler(MessageHandler(filters.ALL, unknown))
+
+    # ====== یادآوری هر ۶ ساعت ======
+    app.job_queue.run_repeating(
+        remind_unanswered,
+        interval=timedelta(hours=REMINDER_INTERVAL_HOURS),
+        first=timedelta(hours=REMINDER_INTERVAL_HOURS),
+    )
 
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=status_monitor, args=(stop_event,), daemon=True)
