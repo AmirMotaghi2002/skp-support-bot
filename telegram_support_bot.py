@@ -27,7 +27,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
 MEDIA_DIR = "media"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_ID")
-ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "162879965")
 ADMIN_IDS = set(int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit())
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
