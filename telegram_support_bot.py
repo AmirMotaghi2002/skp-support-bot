@@ -1051,7 +1051,7 @@ def main() -> None:
     global state
     state = load_state()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).job_queue(JobQueue()).build()
 
     # ====== ConversationHandler اصلی (دانشجو) ======
     conv_handler = ConversationHandler(
@@ -1119,11 +1119,12 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.ALL, unknown))
 
     # ====== یادآوری هر ۶ ساعت ======
-    app.job_queue.run_repeating(
-        remind_unanswered,
-        interval=timedelta(hours=REMINDER_INTERVAL_HOURS),
-        first=timedelta(hours=REMINDER_INTERVAL_HOURS),
-    )
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(
+            remind_unanswered,
+            interval=timedelta(hours=REMINDER_INTERVAL_HOURS),
+            first=timedelta(hours=REMINDER_INTERVAL_HOURS),
+        )
 
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=status_monitor, args=(stop_event,), daemon=True)
