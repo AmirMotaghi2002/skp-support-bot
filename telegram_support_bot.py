@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -11,13 +12,18 @@ from datetime import datetime, timedelta
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
+# نصب خودکار psycopg2 در صورت عدم وجود
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
     DB_AVAILABLE = True
 except ImportError:
-    DB_AVAILABLE = False
-    logging.warning("psycopg2 نصب نیست. برای پشتیبانی دیتابیس: pip install psycopg2-binary")
+    print("psycopg2 یافت نشد. در حال نصب خودکار...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary", "-q"])
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    DB_AVAILABLE = True
+    print("psycopg2 با موفقیت نصب شد.")
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.constants import ChatType
