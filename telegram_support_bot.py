@@ -12,18 +12,18 @@ from datetime import datetime, timedelta
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
-# نصب خودکار psycopg2 در صورت عدم وجود
+# نصب خودکار pg8000 در صورت عدم وجود (pure Python - بدون نیاز به libpq)
 try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+    import pg8000
+    import pg8000.native
     DB_AVAILABLE = True
 except ImportError:
-    print("psycopg2 یافت نشد. در حال نصب خودکار...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary", "-q"])
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+    print("pg8000 یافت نشد. در حال نصب خودکار...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pg8000", "-q"])
+    import pg8000
+    import pg8000.native
     DB_AVAILABLE = True
-    print("psycopg2 با موفقیت نصب شد.")
+    print("pg8000 با موفقیت نصب شد.")
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.constants import ChatType
@@ -158,17 +158,48 @@ status = {
 }
 
 # =====================================================
-# ====== توابع مدیریت دیتابیس PostgreSQL ======
+# ====== توابع مدیریت دیتابیس PostgreSQL (pg8000) ======
 # =====================================================
 
+def _parse_db_url(url: str) -> dict:
+    """تجزیه DATABASE_URL به پارامترهای اتصال"""
+    # فرمت: postgresql://user:password@host:port/dbname
+    import re
+    url = url.replace("postgresql://", "").replace("postgres://", "")
+    match = re.match(r"([^:]+):([^@]+)@([^:/]+):?(\d*)/(.+)", url)
+    if not match:
+        raise Exception("فرمت DATABASE_URL نامعتبر است")
+    user, password, host, port, database = match.groups()
+    # حذف query string احتمالی از database
+    database = database.split("?")[0]
+    return {
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": int(port) if port else 5432,
+        "database": database,
+        "ssl_context": True,
+    }
+
+
 def get_db_connection():
-    """اتصال به دیتابیس PostgreSQL"""
-    if not DB_AVAILABLE:
-        raise Exception("psycopg2 نصب نیست")
+    """اتصال به دیتابیس PostgreSQL با pg8000"""
     if not DATABASE_URL:
         raise Exception("متغیر DATABASE_URL تنظیم نشده است")
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    params = _parse_db_url(DATABASE_URL)
+    conn = pg8000.native.Connection(**params)
     return conn
+
+
+def _row_to_dict(columns: list, row: tuple) -> dict:
+    """تبدیل ردیف به دیکشنری با استفاده از نام ستون‌ها"""
+    if row is None:
+        return None
+    return dict(zip(columns, row))
+
+
+def _rows_to_dicts(columns: list, rows: list) -> list:
+    return [dict(zip(columns, r)) for r in rows]
 
 
 def init_db():
@@ -178,10 +209,9 @@ def init_db():
     """
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
 
         # جدول کاراموزان
-        cur.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS interns (
                 id SERIAL PRIMARY KEY,
                 phone VARCHAR(20) UNIQUE NOT NULL,
@@ -193,8 +223,8 @@ def init_db():
             )
         """)
 
-        # جدول تنظیمات ربات (گروه پشتیبانی و غیره)
-        cur.execute("""
+        # جدول تنظیمات ربات
+        conn.run("""
             CREATE TABLE IF NOT EXISTS bot_settings (
                 key VARCHAR(100) PRIMARY KEY,
                 value TEXT,
@@ -203,7 +233,7 @@ def init_db():
         """)
 
         # جدول سوالات
-        cur.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS questions (
                 id VARCHAR(100) PRIMARY KEY,
                 student_id BIGINT,
@@ -225,7 +255,7 @@ def init_db():
         """)
 
         # جدول استادهای در انتظار پاسخ
-        cur.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS teacher_pending (
                 teacher_id BIGINT PRIMARY KEY,
                 question_id VARCHAR(100),
@@ -233,8 +263,6 @@ def init_db():
             )
         """)
 
-        conn.commit()
-        cur.close()
         conn.close()
         logger.info("✅ دیتابیس با موفقیت راه‌اندازی شد")
     except Exception as e:
@@ -256,22 +284,20 @@ def db_get_intern(phone: str) -> dict | None:
     """دریافت اطلاعات یک کاراموز از دیتابیس"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM interns WHERE phone = %s", (normalize_phone(phone),))
-        row = cur.fetchone()
-        cur.close()
+        rows = conn.run(
+            "SELECT id, phone, first_name, last_name, courses, created_at, updated_at FROM interns WHERE phone = :p",
+            p=normalize_phone(phone)
+        )
+        columns = ["id", "phone", "first_name", "last_name", "courses", "created_at", "updated_at"]
         conn.close()
-        return dict(row) if row else None
+        return _row_to_dict(columns, rows[0] if rows else None)
     except Exception as e:
         logger.error("خطا در دریافت کاراموز: %s", e)
         return None
 
 
 def db_get_allowed_courses(phone: str) -> list | None:
-    """
-    برگرداندن لیست دوره‌های مجاز کاراموز.
-    اگر شماره در سیستم نباشد None برمی‌گردد.
-    """
+    """برگرداندن لیست دوره‌های مجاز کاراموز."""
     intern = db_get_intern(phone)
     if intern is None:
         return None
@@ -283,19 +309,16 @@ def db_add_intern(phone: str, first_name: str, last_name: str, courses: list) ->
     """افزودن یا ویرایش کاراموز در دیتابیس"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
         courses_str = "|".join(courses)
-        cur.execute("""
+        conn.run("""
             INSERT INTO interns (phone, first_name, last_name, courses, updated_at)
-            VALUES (%s, %s, %s, %s, NOW())
+            VALUES (:phone, :fn, :ln, :courses, NOW())
             ON CONFLICT (phone) DO UPDATE
             SET first_name = EXCLUDED.first_name,
                 last_name = EXCLUDED.last_name,
                 courses = EXCLUDED.courses,
                 updated_at = NOW()
-        """, (normalize_phone(phone), first_name, last_name, courses_str))
-        conn.commit()
-        cur.close()
+        """, phone=normalize_phone(phone), fn=first_name, ln=last_name, courses=courses_str)
         conn.close()
         logger.info("کاراموز ثبت/ویرایش شد: %s", phone)
         return True
@@ -308,13 +331,9 @@ def db_remove_intern(phone: str) -> bool:
     """حذف کاراموز از دیتابیس"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM interns WHERE phone = %s", (normalize_phone(phone),))
-        deleted = cur.rowcount > 0
-        conn.commit()
-        cur.close()
+        conn.run("DELETE FROM interns WHERE phone = :p", p=normalize_phone(phone))
         conn.close()
-        return deleted
+        return True
     except Exception as e:
         logger.error("خطا در حذف کاراموز: %s", e)
         return False
@@ -324,12 +343,10 @@ def db_list_interns() -> list:
     """لیست همه کاراموزان"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT phone, first_name, last_name, courses, created_at FROM interns ORDER BY created_at DESC")
-        rows = [dict(r) for r in cur.fetchall()]
-        cur.close()
+        rows = conn.run("SELECT phone, first_name, last_name, courses, created_at FROM interns ORDER BY created_at DESC")
+        columns = ["phone", "first_name", "last_name", "courses", "created_at"]
         conn.close()
-        return rows
+        return _rows_to_dicts(columns, rows)
     except Exception as e:
         logger.error("خطا در دریافت لیست: %s", e)
         return []
@@ -339,12 +356,9 @@ def db_count_interns() -> int:
     """تعداد کاراموزان"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) as cnt FROM interns")
-        row = cur.fetchone()
-        cur.close()
+        rows = conn.run("SELECT COUNT(*) FROM interns")
         conn.close()
-        return row["cnt"] if row else 0
+        return rows[0][0] if rows else 0
     except Exception as e:
         logger.error("خطا: %s", e)
         return 0
@@ -355,12 +369,9 @@ def db_count_interns() -> int:
 def db_get_setting(key: str) -> str | None:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM bot_settings WHERE key = %s", (key,))
-        row = cur.fetchone()
-        cur.close()
+        rows = conn.run("SELECT value FROM bot_settings WHERE key = :k", k=key)
         conn.close()
-        return row["value"] if row else None
+        return rows[0][0] if rows else None
     except Exception as e:
         logger.error("خطا در دریافت تنظیمات: %s", e)
         return None
@@ -369,14 +380,11 @@ def db_get_setting(key: str) -> str | None:
 def db_set_setting(key: str, value: str) -> bool:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        conn.run("""
             INSERT INTO bot_settings (key, value, updated_at)
-            VALUES (%s, %s, NOW())
+            VALUES (:k, :v, NOW())
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        """, (key, value))
-        conn.commit()
-        cur.close()
+        """, k=key, v=value)
         conn.close()
         return True
     except Exception as e:
@@ -386,16 +394,22 @@ def db_set_setting(key: str, value: str) -> bool:
 
 # ====== توابع سوالات ======
 
+_QUESTION_COLS = [
+    "id", "student_id", "student_name", "student_phone", "course", "question",
+    "status", "created_at", "group_message_id", "assigned_teacher_id",
+    "assigned_teacher_name", "answer", "media_file_id", "media_type",
+    "answer_media_file_id", "answer_media_type"
+]
+
 def db_save_question(question_id: str, data: dict) -> bool:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        conn.run("""
             INSERT INTO questions (
                 id, student_id, student_name, student_phone, course, question,
                 status, group_message_id, assigned_teacher_id, assigned_teacher_name,
                 answer, media_file_id, media_type, answer_media_file_id, answer_media_type
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (:id,:sid,:sname,:sphone,:course,:question,:status,:gmid,:atid,:atname,:answer,:mfid,:mtype,:amfid,:amtype)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 group_message_id = EXCLUDED.group_message_id,
@@ -404,25 +418,23 @@ def db_save_question(question_id: str, data: dict) -> bool:
                 answer = EXCLUDED.answer,
                 answer_media_file_id = EXCLUDED.answer_media_file_id,
                 answer_media_type = EXCLUDED.answer_media_type
-        """, (
-            question_id,
-            data.get("student_id"),
-            data.get("student_name"),
-            data.get("student_phone"),
-            data.get("course"),
-            data.get("question"),
-            data.get("status", "open"),
-            data.get("group_message_id"),
-            data.get("assigned_teacher_id"),
-            data.get("assigned_teacher_name"),
-            data.get("answer"),
-            data.get("media_file_id"),
-            data.get("media_type"),
-            data.get("answer_media_file_id"),
-            data.get("answer_media_type"),
-        ))
-        conn.commit()
-        cur.close()
+        """,
+            id=question_id,
+            sid=data.get("student_id"),
+            sname=data.get("student_name"),
+            sphone=data.get("student_phone"),
+            course=data.get("course"),
+            question=data.get("question"),
+            status=data.get("status", "open"),
+            gmid=data.get("group_message_id"),
+            atid=data.get("assigned_teacher_id"),
+            atname=data.get("assigned_teacher_name"),
+            answer=data.get("answer"),
+            mfid=data.get("media_file_id"),
+            mtype=data.get("media_type"),
+            amfid=data.get("answer_media_file_id"),
+            amtype=data.get("answer_media_type"),
+        )
         conn.close()
         return True
     except Exception as e:
@@ -433,12 +445,12 @@ def db_save_question(question_id: str, data: dict) -> bool:
 def db_get_question(question_id: str) -> dict | None:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM questions WHERE id = %s", (question_id,))
-        row = cur.fetchone()
-        cur.close()
+        rows = conn.run(
+            "SELECT id,student_id,student_name,student_phone,course,question,status,created_at,group_message_id,assigned_teacher_id,assigned_teacher_name,answer,media_file_id,media_type,answer_media_file_id,answer_media_type FROM questions WHERE id = :qid",
+            qid=question_id
+        )
         conn.close()
-        return dict(row) if row else None
+        return _row_to_dict(_QUESTION_COLS, rows[0] if rows else None)
     except Exception as e:
         logger.error("خطا در دریافت سوال: %s", e)
         return None
@@ -447,16 +459,14 @@ def db_get_question(question_id: str) -> dict | None:
 def db_update_question_status(question_id: str, status: str, **kwargs) -> bool:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        fields = ["status = %s"]
-        values = [status]
+        # ساخت دینامیک query با named params
+        set_parts = ["status = :status"]
+        params = {"status": status, "qid": question_id}
         for k, v in kwargs.items():
-            fields.append(f"{k} = %s")
-            values.append(v)
-        values.append(question_id)
-        cur.execute(f"UPDATE questions SET {', '.join(fields)} WHERE id = %s", values)
-        conn.commit()
-        cur.close()
+            set_parts.append(f"{k} = :{k}")
+            params[k] = v
+        sql = f"UPDATE questions SET {', '.join(set_parts)} WHERE id = :qid"
+        conn.run(sql, **params)
         conn.close()
         return True
     except Exception as e:
@@ -467,14 +477,11 @@ def db_update_question_status(question_id: str, status: str, **kwargs) -> bool:
 def db_set_teacher_pending(teacher_id: int, question_id: str) -> bool:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        conn.run("""
             INSERT INTO teacher_pending (teacher_id, question_id, updated_at)
-            VALUES (%s, %s, NOW())
+            VALUES (:tid, :qid, NOW())
             ON CONFLICT (teacher_id) DO UPDATE SET question_id = EXCLUDED.question_id, updated_at = NOW()
-        """, (teacher_id, question_id))
-        conn.commit()
-        cur.close()
+        """, tid=teacher_id, qid=question_id)
         conn.close()
         return True
     except Exception as e:
@@ -485,12 +492,9 @@ def db_set_teacher_pending(teacher_id: int, question_id: str) -> bool:
 def db_get_teacher_pending(teacher_id: int) -> str | None:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT question_id FROM teacher_pending WHERE teacher_id = %s", (teacher_id,))
-        row = cur.fetchone()
-        cur.close()
+        rows = conn.run("SELECT question_id FROM teacher_pending WHERE teacher_id = :tid", tid=teacher_id)
         conn.close()
-        return row["question_id"] if row else None
+        return rows[0][0] if rows else None
     except Exception as e:
         logger.error("خطا: %s", e)
         return None
@@ -499,10 +503,7 @@ def db_get_teacher_pending(teacher_id: int) -> str | None:
 def db_remove_teacher_pending(teacher_id: int) -> bool:
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM teacher_pending WHERE teacher_id = %s", (teacher_id,))
-        conn.commit()
-        cur.close()
+        conn.run("DELETE FROM teacher_pending WHERE teacher_id = :tid", tid=teacher_id)
         conn.close()
         return True
     except Exception as e:
@@ -513,6 +514,7 @@ def db_remove_teacher_pending(teacher_id: int) -> bool:
 def db_get_group_chat_id() -> str | None:
     val = db_get_setting("group_chat_id")
     return val or DEFAULT_GROUP_CHAT_ID
+
 
 
 # =====================================================
@@ -741,13 +743,11 @@ async def admin_db_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         count = db_count_interns()
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) as cnt FROM questions")
-        q_count = cur.fetchone()["cnt"]
-        cur.execute("SELECT COUNT(*) as cnt FROM questions WHERE status = 'open'")
-        open_q = cur.fetchone()["cnt"]
-        cur.close()
+        q_rows = conn.run("SELECT COUNT(*) FROM questions")
+        open_rows = conn.run("SELECT COUNT(*) FROM questions WHERE status = 'open'")
         conn.close()
+        q_count = q_rows[0][0] if q_rows else 0
+        open_q = open_rows[0][0] if open_rows else 0
         await update.message.reply_text(
             f"🗄 وضعیت دیتابیس:\n\n"
             f"👥 تعداد کاراموزان: {count}\n"
