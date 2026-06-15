@@ -12,11 +12,12 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
 try:
-    import openpyxl
-    EXCEL_AVAILABLE = True
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    DB_AVAILABLE = True
 except ImportError:
-    EXCEL_AVAILABLE = False
-    logging.warning("openpyxl نصب نیست. برای پشتیبانی اکسل: pip install openpyxl")
+    DB_AVAILABLE = False
+    logging.warning("psycopg2 نصب نیست. برای پشتیبانی دیتابیس: pip install psycopg2-binary")
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.constants import ChatType
@@ -33,12 +34,14 @@ from telegram.ext import (
 # ====== تنظیمات اولیه ======
 TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
-INTERNS_FILE = "interns.xlsx"
 MEDIA_DIR = "media"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_ID")
 
+# ====== تنظیمات دیتابیس PostgreSQL ======
+# این متغیر به صورت خودکار توسط Railway تنظیم می‌شود
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
 # ====== شناسه ادمین‌ها (Telegram user ID) ======
-# برای پیدا کردن ID خودت به @userinfobot پیام بده
 ADMIN_IDS = [
     123456789,   # <-- ID خودت رو اینجا بنویس
     # 987654321, # ادمین دوم (اختیاری)
@@ -117,16 +120,18 @@ MESSAGES = {
     "not_admin": "⛔️ شما دسترسی ادمین ندارید.",
     "admin_help": (
         "🛠 دستورات ادمین:\n\n"
-        "/adduser 09xxxxxxxxx دوره۱|دوره۲\n"
+        "/adduser 09xxxxxxxxx نام|نام‌خانوادگی دوره۱|دوره۲\n"
         "   ➕ افزودن یا ویرایش کاراموز\n\n"
+        "   مثال:\n"
+        "   /adduser 09121234567 علی|محمدی نقشه خوانی|ایسیو ۱\n\n"
         "/removeuser 09xxxxxxxxx\n"
         "   ➖ حذف کاراموز\n\n"
         "/listusers\n"
         "   📋 نمایش همه کاراموزان\n\n"
-        "/getexcel\n"
-        "   📥 دریافت فایل اکسل\n\n"
-        "📤 آپلود اکسل:\n"
-        "   فایل interns.xlsx را برای ربات بفرستید"
+        "/searchuser 09xxxxxxxxx\n"
+        "   🔍 جستجوی کاراموز با شماره\n\n"
+        "/dbstatus\n"
+        "   🗄 وضعیت دیتابیس"
     ),
 }
 
@@ -147,8 +152,89 @@ status = {
 }
 
 # =====================================================
-# ====== توابع مدیریت دیتابیس اکسل کاراموزان ======
+# ====== توابع مدیریت دیتابیس PostgreSQL ======
 # =====================================================
+
+def get_db_connection():
+    """اتصال به دیتابیس PostgreSQL"""
+    if not DB_AVAILABLE:
+        raise Exception("psycopg2 نصب نیست")
+    if not DATABASE_URL:
+        raise Exception("متغیر DATABASE_URL تنظیم نشده است")
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
+
+def init_db():
+    """
+    ساخت جدول‌های دیتابیس در صورت عدم وجود.
+    این تابع یک بار هنگام راه‌اندازی ربات اجرا می‌شود.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # جدول کاراموزان
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS interns (
+                id SERIAL PRIMARY KEY,
+                phone VARCHAR(20) UNIQUE NOT NULL,
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                courses TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # جدول تنظیمات ربات (گروه پشتیبانی و غیره)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key VARCHAR(100) PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # جدول سوالات
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                id VARCHAR(100) PRIMARY KEY,
+                student_id BIGINT,
+                student_name VARCHAR(200),
+                student_phone VARCHAR(20),
+                course VARCHAR(200),
+                question TEXT,
+                status VARCHAR(50) DEFAULT 'open',
+                created_at TIMESTAMP DEFAULT NOW(),
+                group_message_id BIGINT,
+                assigned_teacher_id BIGINT,
+                assigned_teacher_name VARCHAR(200),
+                answer TEXT,
+                media_file_id VARCHAR(500),
+                media_type VARCHAR(50),
+                answer_media_file_id VARCHAR(500),
+                answer_media_type VARCHAR(50)
+            )
+        """)
+
+        # جدول استادهای در انتظار پاسخ
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS teacher_pending (
+                teacher_id BIGINT PRIMARY KEY,
+                question_id VARCHAR(100),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ دیتابیس با موفقیت راه‌اندازی شد")
+    except Exception as e:
+        logger.error("❌ خطا در راه‌اندازی دیتابیس: %s", e)
+        raise
+
 
 def normalize_phone(phone: str) -> str:
     """نرمال‌سازی شماره تلفن به فرمت 09XXXXXXXXX"""
@@ -160,91 +246,268 @@ def normalize_phone(phone: str) -> str:
     return phone
 
 
-def load_interns_db() -> dict:
-    """
-    بارگذاری دیتابیس کاراموزان از فایل اکسل.
-    فرمت: ستون A = شماره موبایل، ستون B = دوره‌ها با | جدا شده
-    مثال B: نقشه خوانی|ایسیو ۱|مالتی پلکس ایران خودرو
-    """
-    if not EXCEL_AVAILABLE:
-        logger.warning("openpyxl نصب نیست")
-        return {}
-    if not os.path.exists(INTERNS_FILE):
-        return {}
+def db_get_intern(phone: str) -> dict | None:
+    """دریافت اطلاعات یک کاراموز از دیتابیس"""
     try:
-        wb = openpyxl.load_workbook(INTERNS_FILE)
-        ws = wb.active
-        db = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            phone_raw = row[0]
-            courses_raw = row[1]
-            if not phone_raw:
-                continue
-            phone = normalize_phone(str(phone_raw))
-            courses = [c.strip() for c in str(courses_raw).split("|") if c.strip()] if courses_raw else []
-            db[phone] = courses
-        logger.info("دیتابیس از اکسل: %d کاراموز", len(db))
-        return db
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM interns WHERE phone = %s", (normalize_phone(phone),))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(row) if row else None
     except Exception as e:
-        logger.error("خطا در خواندن اکسل: %s", e)
-        return {}
+        logger.error("خطا در دریافت کاراموز: %s", e)
+        return None
 
 
-def save_interns_db(db: dict) -> bool:
-    """ذخیره دیتابیس در فایل اکسل"""
-    if not EXCEL_AVAILABLE:
-        return False
+def db_get_allowed_courses(phone: str) -> list | None:
+    """
+    برگرداندن لیست دوره‌های مجاز کاراموز.
+    اگر شماره در سیستم نباشد None برمی‌گردد.
+    """
+    intern = db_get_intern(phone)
+    if intern is None:
+        return None
+    courses_str = intern.get("courses") or ""
+    return [c.strip() for c in courses_str.split("|") if c.strip()]
+
+
+def db_add_intern(phone: str, first_name: str, last_name: str, courses: list) -> bool:
+    """افزودن یا ویرایش کاراموز در دیتابیس"""
     try:
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "کاراموزان"
-        ws["A1"] = "شماره موبایل"
-        ws["B1"] = "دوره‌ها (با | جدا کنید)"
-        ws["A1"].font = openpyxl.styles.Font(bold=True)
-        ws["B1"].font = openpyxl.styles.Font(bold=True)
-        ws.column_dimensions["A"].width = 20
-        ws.column_dimensions["B"].width = 70
-        for i, (phone, courses) in enumerate(db.items(), start=2):
-            ws.cell(row=i, column=1, value=phone)
-            ws.cell(row=i, column=2, value="|".join(courses))
-        wb.save(INTERNS_FILE)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        courses_str = "|".join(courses)
+        cur.execute("""
+            INSERT INTO interns (phone, first_name, last_name, courses, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (phone) DO UPDATE
+            SET first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                courses = EXCLUDED.courses,
+                updated_at = NOW()
+        """, (normalize_phone(phone), first_name, last_name, courses_str))
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("کاراموز ثبت/ویرایش شد: %s", phone)
         return True
     except Exception as e:
-        logger.error("خطا در ذخیره اکسل: %s", e)
+        logger.error("خطا در افزودن کاراموز: %s", e)
         return False
 
 
-def get_allowed_courses(phone: str):
-    """برمیگردونه لیست دوره‌های مجاز یا None اگر نبود"""
-    db = load_interns_db()
-    return db.get(normalize_phone(phone))
-
-
-def add_intern(phone: str, courses: list) -> bool:
-    db = load_interns_db()
-    db[normalize_phone(phone)] = courses
-    return save_interns_db(db)
-
-
-def remove_intern(phone: str) -> bool:
-    db = load_interns_db()
-    normalized = normalize_phone(phone)
-    if normalized not in db:
+def db_remove_intern(phone: str) -> bool:
+    """حذف کاراموز از دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM interns WHERE phone = %s", (normalize_phone(phone),))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return deleted
+    except Exception as e:
+        logger.error("خطا در حذف کاراموز: %s", e)
         return False
-    del db[normalized]
-    return save_interns_db(db)
 
 
-def create_sample_excel_if_missing():
-    """اگر فایل اکسل وجود نداشت، نمونه بساز"""
-    if not EXCEL_AVAILABLE or os.path.exists(INTERNS_FILE):
-        return
-    sample = {
-        "09121234567": ["نقشه خوانی", "ایسیو ۱"],
-        "09351234567": ["مالتی پلکس ایران خودرو", "هیوندا و کیا"],
-    }
-    save_interns_db(sample)
-    logger.info("فایل اکسل نمونه ساخته شد: %s", INTERNS_FILE)
+def db_list_interns() -> list:
+    """لیست همه کاراموزان"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT phone, first_name, last_name, courses, created_at FROM interns ORDER BY created_at DESC")
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error("خطا در دریافت لیست: %s", e)
+        return []
+
+
+def db_count_interns() -> int:
+    """تعداد کاراموزان"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as cnt FROM interns")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["cnt"] if row else 0
+    except Exception as e:
+        logger.error("خطا: %s", e)
+        return 0
+
+
+# ====== توابع تنظیمات ربات ======
+
+def db_get_setting(key: str) -> str | None:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM bot_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["value"] if row else None
+    except Exception as e:
+        logger.error("خطا در دریافت تنظیمات: %s", e)
+        return None
+
+
+def db_set_setting(key: str, value: str) -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO bot_settings (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, (key, value))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در ذخیره تنظیمات: %s", e)
+        return False
+
+
+# ====== توابع سوالات ======
+
+def db_save_question(question_id: str, data: dict) -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO questions (
+                id, student_id, student_name, student_phone, course, question,
+                status, group_message_id, assigned_teacher_id, assigned_teacher_name,
+                answer, media_file_id, media_type, answer_media_file_id, answer_media_type
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO UPDATE SET
+                status = EXCLUDED.status,
+                group_message_id = EXCLUDED.group_message_id,
+                assigned_teacher_id = EXCLUDED.assigned_teacher_id,
+                assigned_teacher_name = EXCLUDED.assigned_teacher_name,
+                answer = EXCLUDED.answer,
+                answer_media_file_id = EXCLUDED.answer_media_file_id,
+                answer_media_type = EXCLUDED.answer_media_type
+        """, (
+            question_id,
+            data.get("student_id"),
+            data.get("student_name"),
+            data.get("student_phone"),
+            data.get("course"),
+            data.get("question"),
+            data.get("status", "open"),
+            data.get("group_message_id"),
+            data.get("assigned_teacher_id"),
+            data.get("assigned_teacher_name"),
+            data.get("answer"),
+            data.get("media_file_id"),
+            data.get("media_type"),
+            data.get("answer_media_file_id"),
+            data.get("answer_media_type"),
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در ذخیره سوال: %s", e)
+        return False
+
+
+def db_get_question(question_id: str) -> dict | None:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM questions WHERE id = %s", (question_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error("خطا در دریافت سوال: %s", e)
+        return None
+
+
+def db_update_question_status(question_id: str, status: str, **kwargs) -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        fields = ["status = %s"]
+        values = [status]
+        for k, v in kwargs.items():
+            fields.append(f"{k} = %s")
+            values.append(v)
+        values.append(question_id)
+        cur.execute(f"UPDATE questions SET {', '.join(fields)} WHERE id = %s", values)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در آپدیت سوال: %s", e)
+        return False
+
+
+def db_set_teacher_pending(teacher_id: int, question_id: str) -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO teacher_pending (teacher_id, question_id, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (teacher_id) DO UPDATE SET question_id = EXCLUDED.question_id, updated_at = NOW()
+        """, (teacher_id, question_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در ذخیره teacher_pending: %s", e)
+        return False
+
+
+def db_get_teacher_pending(teacher_id: int) -> str | None:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT question_id FROM teacher_pending WHERE teacher_id = %s", (teacher_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["question_id"] if row else None
+    except Exception as e:
+        logger.error("خطا: %s", e)
+        return None
+
+
+def db_remove_teacher_pending(teacher_id: int) -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM teacher_pending WHERE teacher_id = %s", (teacher_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا: %s", e)
+        return False
+
+
+def db_get_group_chat_id() -> str | None:
+    val = db_get_setting("group_chat_id")
+    return val or DEFAULT_GROUP_CHAT_ID
+
 
 # =====================================================
 # ====== توابع کمکی ======
@@ -316,31 +579,6 @@ def status_monitor(stop_event: threading.Event) -> None:
     display_status(final=True)
 
 
-_state_default = {
-    "group_chat_id": DEFAULT_GROUP_CHAT_ID,
-    "questions": {},
-    "teacher_pending": {},
-}
-
-
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning("بارگذاری state موفق نبود: %s", e)
-    return dict(_state_default)
-
-
-def save_state(data: dict) -> None:
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("ذخیره state خطا: %s", e)
-
-
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -348,6 +586,7 @@ def is_admin(user_id: int) -> bool:
 def build_course_keyboard(allowed_courses=None) -> list:
     courses = allowed_courses if allowed_courses is not None else COURSES
     return [[InlineKeyboardButton(c, callback_data=f"course:{c}")] for c in courses]
+
 
 # =====================================================
 # ====== دستورات ادمین ======
@@ -362,21 +601,49 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def admin_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /adduser 09121234567 نقشه خوانی|ایسیو ۱|مالتی پلکس ایران خودرو
+    فرمت: /adduser 09121234567 علی|محمدی نقشه خوانی|ایسیو ۱
+    آرگومان اول: شماره موبایل
+    آرگومان دوم: نام|نام‌خانوادگی
+    آرگومان سوم به بعد: دوره‌ها با | جدا شده
     """
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(MESSAGES["not_admin"])
         return
+
     args = context.args
-    if len(args) < 2:
+    if len(args) < 3:
         await update.message.reply_text(
-            "فرمت اشتباه!\n\nنمونه:\n/adduser 09121234567 نقشه خوانی|ایسیو ۱\n\n"
-            "دوره‌ها را با | از هم جدا کنید."
+            "⚠️ فرمت اشتباه!\n\n"
+            "فرمت صحیح:\n"
+            "/adduser شماره نام|نام‌خانوادگی دوره‌ها\n\n"
+            "مثال:\n"
+            "/adduser 09121234567 علی|محمدی نقشه خوانی|ایسیو ۱\n\n"
+            "📌 دوره‌ها را با | از هم جدا کنید."
         )
         return
+
     phone = normalize_phone(args[0])
-    courses_str = " ".join(args[1:])
+
+    # آرگومان دوم: نام|نام‌خانوادگی
+    name_parts = args[1].split("|")
+    if len(name_parts) < 2:
+        await update.message.reply_text(
+            "⚠️ فرمت نام اشتباه است!\n"
+            "نام و نام‌خانوادگی را با | جدا کنید.\n"
+            "مثال: علی|محمدی"
+        )
+        return
+    first_name = name_parts[0].strip()
+    last_name = name_parts[1].strip()
+
+    # آرگومان سوم به بعد: دوره‌ها
+    courses_str = " ".join(args[2:])
     courses = [c.strip() for c in courses_str.split("|") if c.strip()]
+
+    if not courses:
+        await update.message.reply_text("⚠️ حداقل یک دوره باید وارد شود.")
+        return
+
     invalid = [c for c in courses if c not in COURSES]
     if invalid:
         courses_list = "\n".join(f"• {c}" for c in COURSES)
@@ -384,13 +651,17 @@ async def admin_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"⚠️ دوره‌های نامعتبر:\n{', '.join(invalid)}\n\nدوره‌های مجاز:\n{courses_list}"
         )
         return
-    if add_intern(phone, courses):
+
+    if db_add_intern(phone, first_name, last_name, courses):
         await update.message.reply_text(
-            f"✅ ثبت/ویرایش شد:\n📞 {phone}\n📚 دوره‌ها:\n" +
+            f"✅ کاراموز ثبت/ویرایش شد:\n"
+            f"📞 شماره: {phone}\n"
+            f"👤 نام: {first_name} {last_name}\n"
+            f"📚 دوره‌ها:\n" +
             "\n".join(f"  ✅ {c}" for c in courses)
         )
     else:
-        await update.message.reply_text("❌ خطا. مطمئن شوید openpyxl نصب است:\npip install openpyxl")
+        await update.message.reply_text("❌ خطا در ثبت. لطفاً دوباره امتحان کنید.")
 
 
 async def admin_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -403,7 +674,7 @@ async def admin_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("فرمت: /removeuser 09121234567")
         return
     phone = normalize_phone(args[0])
-    if remove_intern(phone):
+    if db_remove_intern(phone):
         await update.message.reply_text(f"✅ کاراموز {phone} حذف شد.")
     else:
         await update.message.reply_text(f"⚠️ شماره {phone} در سیستم یافت نشد.")
@@ -414,58 +685,73 @@ async def admin_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(MESSAGES["not_admin"])
         return
-    db = load_interns_db()
-    if not db:
+    interns = db_list_interns()
+    if not interns:
         await update.message.reply_text("📋 هیچ کاراموزی ثبت نشده است.")
         return
-    lines = [f"📋 لیست کاراموزان ({len(db)} نفر):\n"]
-    for phone, courses in db.items():
-        lines.append(f"📞 {phone}\n   {' | '.join(courses) if courses else 'بدون دوره'}\n")
+    lines = [f"📋 لیست کاراموزان ({len(interns)} نفر):\n"]
+    for intern in interns:
+        name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+        courses = intern.get("courses") or ""
+        lines.append(
+            f"📞 {intern['phone']}\n"
+            f"   👤 {name}\n"
+            f"   📚 {courses.replace('|', ' | ') if courses else 'بدون دوره'}\n"
+        )
     text = "\n".join(lines)
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         await update.message.reply_text(chunk)
 
 
-async def admin_get_excel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/getexcel - ارسال فایل اکسل"""
+async def admin_search_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/searchuser 09121234567"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text(MESSAGES["not_admin"])
         return
-    if not os.path.exists(INTERNS_FILE):
-        await update.message.reply_text("❌ فایل اکسل وجود ندارد.")
+    args = context.args
+    if not args:
+        await update.message.reply_text("فرمت: /searchuser 09121234567")
         return
-    try:
-        with open(INTERNS_FILE, "rb") as f:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=f,
-                filename="interns.xlsx",
-                caption="📊 فایل اکسل کاراموزان"
-            )
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {e}")
+    intern = db_get_intern(args[0])
+    if not intern:
+        await update.message.reply_text(f"⚠️ کاراموزی با شماره {args[0]} یافت نشد.")
+        return
+    name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+    courses = (intern.get("courses") or "").replace("|", "\n   • ")
+    await update.message.reply_text(
+        f"🔍 نتیجه جستجو:\n\n"
+        f"📞 شماره: {intern['phone']}\n"
+        f"👤 نام: {name}\n"
+        f"📚 دوره‌ها:\n   • {courses}\n"
+        f"🗓 تاریخ ثبت: {intern.get('created_at','')}"
+    )
 
 
-async def admin_upload_excel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """آپلود فایل اکسل توسط ادمین"""
+async def admin_db_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/dbstatus"""
     if not is_admin(update.effective_user.id):
-        return
-    doc = update.message.document
-    if not doc or not (doc.file_name or "").endswith(".xlsx"):
-        await update.message.reply_text(
-            "⚠️ فقط فایل .xlsx قبول می‌شود.\n"
-            "فرمت: ستون A = شماره موبایل، ستون B = دوره‌ها با | جدا شده"
-        )
+        await update.message.reply_text(MESSAGES["not_admin"])
         return
     try:
-        file = await context.bot.get_file(doc.file_id)
-        await file.download_to_drive(INTERNS_FILE)
-        db = load_interns_db()
+        count = db_count_interns()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as cnt FROM questions")
+        q_count = cur.fetchone()["cnt"]
+        cur.execute("SELECT COUNT(*) as cnt FROM questions WHERE status = 'open'")
+        open_q = cur.fetchone()["cnt"]
+        cur.close()
+        conn.close()
         await update.message.reply_text(
-            f"✅ فایل اکسل بارگذاری شد!\n📊 تعداد کاراموزان: {len(db)} نفر\n\nبرای مشاهده: /listusers"
+            f"🗄 وضعیت دیتابیس:\n\n"
+            f"👥 تعداد کاراموزان: {count}\n"
+            f"❓ کل سوالات: {q_count}\n"
+            f"🟡 سوالات باز: {open_q}\n"
+            f"✅ دیتابیس متصل است"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {e}")
+        await update.message.reply_text(f"❌ خطا در اتصال به دیتابیس:\n{e}")
+
 
 # =====================================================
 # ====== هندلرهای اصلی ربات ======
@@ -482,9 +768,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        state_data = load_state()
-        state_data["group_chat_id"] = update.effective_chat.id
-        save_state(state_data)
+        db_set_setting("group_chat_id", str(update.effective_chat.id))
         await update.message.reply_text(MESSAGES["group_set"].format(group_id=update.effective_chat.id))
     else:
         await update.message.reply_text(MESSAGES["setgroup_private"])
@@ -549,25 +833,28 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("شماره تلفن نامعتبر است. لطفاً مجدداً امتحان کنید.")
         return STUDENT_PHONE
 
-    allowed_courses = get_allowed_courses(phone)
+    allowed_courses = db_get_allowed_courses(phone)
     if allowed_courses is None:
         logger.info("شماره %s مجاز نیست", phone)
         await update.message.reply_text(MESSAGES["not_authorized"], reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
 
     normalized = normalize_phone(phone)
-    state_data = load_state()
-    users = state_data.get("users") or {}
-    users[str(user.id)] = {"phone": normalized, "allowed_courses": allowed_courses, "name": user.full_name}
-    state_data["users"] = users
-    save_state(state_data)
+    intern = db_get_intern(phone)
+    intern_name = ""
+    if intern:
+        intern_name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+
     context.user_data["phone"] = normalized
     context.user_data["allowed_courses"] = allowed_courses
 
     try:
+        greeting = f"✅ شماره شما تأیید شد: {normalized}"
+        if intern_name:
+            greeting = f"✅ خوش آمدید {intern_name}!\nشماره شما تأیید شد: {normalized}"
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"✅ شماره شما تأیید شد: {normalized}\n\n📚 دوره‌های در دسترس شما:",
+            text=f"{greeting}\n\n📚 دوره‌های در دسترس شما:",
             reply_markup=ReplyKeyboardRemove()
         )
         await context.bot.send_message(
@@ -619,17 +906,19 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(MESSAGES["need_course"])
         return ConversationHandler.END
 
-    state_data = load_state()
-    group_chat_id = state_data.get("group_chat_id") or DEFAULT_GROUP_CHAT_ID
+    group_chat_id = db_get_group_chat_id()
     if not group_chat_id:
         await update.message.reply_text(MESSAGES["group_not_set"])
         return ConversationHandler.END
 
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    state_data["questions"][question_id] = {
+    phone = context.user_data.get("phone", "")
+
+    question_data = {
         "student_id": user.id,
         "student_name": user.full_name,
+        "student_phone": phone,
         "course": course,
         "question": question_text,
         "status": "open",
@@ -642,7 +931,6 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "media_type": media_type,
     }
 
-    phone = (state_data.get("users") or {}).get(str(user.id), {}).get("phone") or context.user_data.get("phone")
     group_message = (
         f"سوال جدید ثبت شد:\n"
         f"👨‍🎓 دانشجو: {user.full_name}\n"
@@ -659,7 +947,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             chat_id=group_chat_id, text=group_message,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        state_data["questions"][question_id]["group_message_id"] = msg.message_id
+        question_data["group_message_id"] = msg.message_id
         if media_file_id and media_type:
             try:
                 if media_type == "photo":
@@ -676,7 +964,8 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     await context.bot.send_animation(chat_id=group_chat_id, animation=media_file_id, caption="🎬 GIF سوال")
             except Exception as e:
                 logger.error("خطا رسانه به گروه: %s", e)
-        save_state(state_data)
+
+        db_save_question(question_id, question_data)
         await update.message.reply_text(MESSAGES["question_sent"])
         try:
             await context.bot.send_message(
@@ -695,8 +984,7 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     action, question_id = query.data.split(":", 1)
-    state_data = load_state()
-    question = state_data["questions"].get(question_id)
+    question = db_get_question(question_id)
     if not question:
         await query.edit_message_text("این سوال موجود نیست.")
         return
@@ -705,11 +993,12 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if action == "answer":
         teacher = update.effective_user
-        question["status"] = "assigned"
-        question["assigned_teacher_id"] = teacher.id
-        question["assigned_teacher_name"] = teacher.full_name
-        state_data["teacher_pending"][str(teacher.id)] = question_id
-        save_state(state_data)
+        db_update_question_status(
+            question_id, "assigned",
+            assigned_teacher_id=teacher.id,
+            assigned_teacher_name=teacher.full_name
+        )
+        db_set_teacher_pending(teacher.id, question_id)
         await query.edit_message_text(
             query.message.text + "\n\n" + MESSAGES["selected_answer"].format(teacher=teacher.full_name)
         )
@@ -740,8 +1029,7 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error("خطا ارسال به استاد: %s", e)
             await query.message.reply_text(MESSAGES["teacher_private_error"])
     elif action == "not_related":
-        question["status"] = "not_related"
-        save_state(state_data)
+        db_update_question_status(question_id, "not_related")
         await query.edit_message_text(query.message.text + "\n\n" + MESSAGES["not_related_post"])
         try:
             await context.bot.send_message(chat_id=question["student_id"], text=MESSAGES["student_not_related"])
@@ -750,15 +1038,8 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # اگر ادمین فایل xlsx فرستاد، پردازش کن
-    if update.message.document and is_admin(update.effective_user.id):
-        if (update.message.document.file_name or "").endswith(".xlsx"):
-            await admin_upload_excel(update, context)
-            return
-
-    teacher_id = str(update.effective_user.id)
-    state_data = load_state()
-    pending = state_data["teacher_pending"].get(teacher_id)
+    teacher_id = update.effective_user.id
+    pending = db_get_teacher_pending(teacher_id)
     if not pending:
         await update.message.reply_text(MESSAGES["no_pending_question"])
         return
@@ -794,17 +1075,18 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("لطفاً متن یا رسانه‌ای برای پاسخ ارسال کنید.")
         return
 
-    question = state_data["questions"].get(pending)
+    question = db_get_question(pending)
     if not question:
         await update.message.reply_text(MESSAGES["question_not_found"])
         return
 
-    question["status"] = "answered"
-    question["answer"] = answer_text
-    question["answer_media_file_id"] = answer_media_file_id
-    question["answer_media_type"] = answer_media_type
-    state_data["teacher_pending"].pop(teacher_id, None)
-    save_state(state_data)
+    db_update_question_status(
+        pending, "answered",
+        answer=answer_text,
+        answer_media_file_id=answer_media_file_id,
+        answer_media_type=answer_media_type
+    )
+    db_remove_teacher_pending(teacher_id)
 
     student_msg = (
         f"✅ پاسخ استاد:\n📚 دوره: {question['course']}\n"
@@ -837,13 +1119,15 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error("خطا ارسال پاسخ: %s", e)
         await update.message.reply_text(MESSAGES["answer_send_failed"])
 
-    group_chat_id = state_data.get("group_chat_id") or DEFAULT_GROUP_CHAT_ID
+    group_chat_id = db_get_group_chat_id()
     if group_chat_id and question.get("group_message_id"):
         try:
             await context.bot.edit_message_text(
                 chat_id=group_chat_id,
                 message_id=question["group_message_id"],
-                text=f"{question['question']}\n\n" + MESSAGES["question_answered_group"].format(teacher=question["assigned_teacher_name"]),
+                text=f"{question['question']}\n\n" + MESSAGES["question_answered_group"].format(
+                    teacher=question["assigned_teacher_name"]
+                ),
             )
         except Exception as e:
             logger.warning("خطا update گروه: %s", e)
@@ -853,8 +1137,7 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     action, question_id = query.data.split(":", 1)
-    state_data = load_state()
-    question = state_data["questions"].get(question_id)
+    question = db_get_question(question_id)
     if not question:
         try:
             await query.edit_message_text("خطا: سوال یافت نشد.")
@@ -877,10 +1160,13 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error("خطا نظرسنجی: %s", e)
         return ConversationHandler.END
     elif action == "ask_more":
-        allowed_courses = (state_data.get("users") or {}).get(str(question["student_id"]), {}).get("allowed_courses")
+        allowed_courses = context.user_data.get("allowed_courses")
+        if not allowed_courses:
+            phone = context.user_data.get("phone", "")
+            allowed_courses = db_get_allowed_courses(phone) if phone else None
         try:
             await context.bot.send_message(
-                chat_id=question["student_id"], text="دوره مورد نظر رو انتخاب کنید:",
+                chat_id=query.from_user.id, text="دوره مورد نظر رو انتخاب کنید:",
                 reply_markup=InlineKeyboardMarkup(build_course_keyboard(allowed_courses))
             )
         except Exception:
@@ -903,20 +1189,25 @@ async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(MESSAGES["unknown"])
 
+
 # =====================================================
 # ====== main ======
 # =====================================================
 
 def main() -> None:
-    create_sample_excel_if_missing()
+    # راه‌اندازی دیتابیس
+    logger.info("در حال راه‌اندازی دیتابیس...")
+    init_db()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # دستورات ادمین (باید قبل از conv_handler باشند)
+    # دستورات ادمین
     app.add_handler(CommandHandler("admin", admin_help))
     app.add_handler(CommandHandler("adduser", admin_add_user))
     app.add_handler(CommandHandler("removeuser", admin_remove_user))
     app.add_handler(CommandHandler("listusers", admin_list_users))
-    app.add_handler(CommandHandler("getexcel", admin_get_excel))
+    app.add_handler(CommandHandler("searchuser", admin_search_user))
+    app.add_handler(CommandHandler("dbstatus", admin_db_status))
 
     conv_handler = ConversationHandler(
         entry_points=[
