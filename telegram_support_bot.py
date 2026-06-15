@@ -5,6 +5,7 @@ import sys
 import threading
 import urllib.request
 import uuid
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -32,6 +33,48 @@ ADMIN_IDS = set(int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().is
 REMINDER_INTERVAL_HOURS = 6
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
+
+DB_FILE = "users.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        phone TEXT PRIMARY KEY,
+        expire_date TEXT NOT NULL
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def check_subscription(phone):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT expire_date FROM subscriptions WHERE phone=?", (phone,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return False
+
+    try:
+        return datetime.strptime(row[0], "%Y-%m-%d") >= datetime.now()
+    except Exception:
+        return False
+
+def add_subscription(phone, days):
+    expire = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO subscriptions(phone, expire_date) VALUES (?, ?)",
+        (phone, expire)
+    )
+    conn.commit()
+    conn.close()
+
+
 
 COURSES = [
     "نقشه خوانی", "نتظیم موتور", "پارامتر خوانی",
@@ -672,6 +715,12 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not phone:
         await update.message.reply_text("شماره تلفن نامعتبر است. لطفاً مجدداً امتحان کنید.")
         return STUDENT_PHONE
+
+    if not check_subscription(phone):
+        await update.message.reply_text(
+            "❌ اشتراک شما فعال نیست یا به پایان رسیده است.\nبرای تمدید با پشتیبانی تماس بگیرید."
+        )
+        return ConversationHandler.END
     state_data = load_state()
     users = state_data.setdefault("users", {})
     users.setdefault(str(user.id), {})["phone"] = phone
@@ -1106,3 +1155,16 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+async def addsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    try:
+        phone = context.args[0]
+        days = int(context.args[1])
+        add_subscription(phone, days)
+        await update.message.reply_text(f"✅ اشتراک {phone} برای {days} روز فعال شد.")
+    except Exception:
+        await update.message.reply_text("/addsub 09123456789 30")
+
