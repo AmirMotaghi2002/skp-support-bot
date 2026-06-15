@@ -163,20 +163,17 @@ status = {
 
 def _parse_db_url(url: str) -> dict:
     """تجزیه DATABASE_URL به پارامترهای اتصال"""
-    # فرمت: postgresql://user:password@host:port/dbname
-    import re
-    url = url.replace("postgresql://", "").replace("postgres://", "")
-    match = re.match(r"([^:]+):([^@]+)@([^:/]+):?(\d*)/(.+)", url)
-    if not match:
-        raise Exception("فرمت DATABASE_URL نامعتبر است")
-    user, password, host, port, database = match.groups()
-    # حذف query string احتمالی از database
-    database = database.split("?")[0]
+    from urllib.parse import urlparse
+    url = url.strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    parsed = urlparse(url)
+    database = parsed.path.lstrip("/").split("?")[0]
     return {
-        "user": user,
-        "password": password,
-        "host": host,
-        "port": int(port) if port else 5432,
+        "user": parsed.username,
+        "password": parsed.password,
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
         "database": database,
         "ssl_context": True,
     }
