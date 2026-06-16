@@ -161,31 +161,44 @@ status = {
 # ====== توابع مدیریت دیتابیس PostgreSQL (pg8000) ======
 # =====================================================
 
-def _parse_db_url(url: str) -> dict:
-    """تجزیه DATABASE_URL به پارامترهای اتصال"""
-    from urllib.parse import urlparse
-    url = url.strip()
+def get_db_connection():
+    """اتصال به دیتابیس PostgreSQL با pg8000"""
+    # اولویت: استفاده از متغیرهای جداگانه Railway (مطمئن‌تر)
+    pg_host = os.environ.get("PGHOST")
+    pg_user = os.environ.get("PGUSER")
+    pg_password = os.environ.get("PGPASSWORD")
+    pg_database = os.environ.get("PGDATABASE")
+    pg_port = int(os.environ.get("PGPORT", 5432))
+
+    if pg_host and pg_user and pg_database:
+        logger.info("اتصال با متغیرهای PG...")
+        return pg8000.native.Connection(
+            host=pg_host,
+            user=pg_user,
+            password=pg_password,
+            database=pg_database,
+            port=pg_port,
+            ssl_context=True,
+        )
+
+    # fallback: پارس DATABASE_URL
+    if not DATABASE_URL:
+        raise Exception("متغیر DATABASE_URL یا PGHOST تنظیم نشده است")
+
+    from urllib.parse import urlparse, unquote
+    url = DATABASE_URL.strip()
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
     parsed = urlparse(url)
-    database = parsed.path.lstrip("/").split("?")[0]
-    return {
-        "user": parsed.username,
-        "password": parsed.password,
-        "host": parsed.hostname,
-        "port": parsed.port or 5432,
-        "database": database,
-        "ssl_context": True,
-    }
-
-
-def get_db_connection():
-    """اتصال به دیتابیس PostgreSQL با pg8000"""
-    if not DATABASE_URL:
-        raise Exception("متغیر DATABASE_URL تنظیم نشده است")
-    params = _parse_db_url(DATABASE_URL)
-    conn = pg8000.native.Connection(**params)
-    return conn
+    logger.info("اتصال با DATABASE_URL - host=%s user=%s", parsed.hostname, parsed.username)
+    return pg8000.native.Connection(
+        host=parsed.hostname,
+        user=parsed.username,
+        password=unquote(parsed.password) if parsed.password else None,
+        database=parsed.path.lstrip("/").split("?")[0],
+        port=parsed.port or 5432,
+        ssl_context=True,
+    )
 
 
 def _row_to_dict(columns: list, row: tuple) -> dict:
