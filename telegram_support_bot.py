@@ -95,7 +95,12 @@ MESSAGES = {
     ),
     "group_set": "گروه پشتیبانی ثبت شد.\nID گروه: {group_id}",
     "setgroup_private": "این دستور را داخل گروه پشتیبانی اجرا کنید.",
-    "course_selected": "دوره انتخاب شده: {course}\n\nحالا سوال خود را ارسال کن (متن، عکس، ویدیو، ویس، فایل و غیره).",
+    "course_selected": (
+        "دوره انتخاب شده: {course}\n\n"
+        "📩 حالا سوال خود را ارسال کنید.\n"
+        "می‌توانید چند پیام (متن، عکس، ویدیو، ویس، فایل) ارسال کنید.\n"
+        "وقتی آماده شدید دکمه 📤 ارسال سوال را بزنید تا همه پیام‌ها یکجا ارسال شوند."
+    ),
     "need_course": "ابتدا باید دوره را انتخاب کنید. /start را ارسال کنید.",
     "group_not_set": "گروه پشتیبانی تنظیم نشده است. ابتدا /setgroup را در گروه پشتیبانی اجرا کنید.",
     "question_sent": "سوال شما ثبت شد و به گروه اساتید ارسال شد. به زودی پاسخ دریافت می‌کنید.",
@@ -810,7 +815,16 @@ async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     course = query.data.split(":", 1)[1]
     context.user_data["selected_course"] = course
-    await query.message.edit_text(MESSAGES["course_selected"].format(course=course))
+    # پاک‌سازی صف پیام‌های قبلی
+    context.user_data["pending_messages"] = []
+    send_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 ارسال سوال", callback_data="submit_question")],
+        [InlineKeyboardButton("🗑 پاک کردن پیام‌ها", callback_data="clear_question")],
+    ])
+    await query.message.edit_text(
+        MESSAGES["course_selected"].format(course=course),
+        reply_markup=send_keyboard,
+    )
     return STUDENT_QUESTION
 
 
@@ -898,106 +912,150 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return STUDENT_COURSE
 
 
+def _extract_message_data(message) -> dict | None:
+    """استخراج داده پیام و تبدیل به دیکشنری برای ذخیره در صف"""
+    if message.text:
+        return {"text": message.text.strip(), "media_file_id": None, "media_type": None}
+    elif message.photo:
+        return {"text": message.caption or "", "media_file_id": message.photo[-1].file_id, "media_type": "photo"}
+    elif message.video:
+        return {"text": message.caption or "", "media_file_id": message.video.file_id, "media_type": "video"}
+    elif message.voice:
+        return {"text": message.caption or "", "media_file_id": message.voice.file_id, "media_type": "voice"}
+    elif message.document:
+        return {"text": message.caption or "", "media_file_id": message.document.file_id, "media_type": "document"}
+    elif message.audio:
+        return {"text": message.caption or "", "media_file_id": message.audio.file_id, "media_type": "audio"}
+    elif message.animation:
+        return {"text": message.caption or "", "media_file_id": message.animation.file_id, "media_type": "animation"}
+    return None
+
+
 async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
+    """پیام‌های کاراموز را در صف ذخیره می‌کند تا با دکمه ارسال شوند"""
     course = context.user_data.get("selected_course")
-    question_text = media_file_id = media_type = None
-
-    if update.message.text:
-        question_text = update.message.text.strip()
-    elif update.message.photo:
-        question_text = update.message.caption or "عکس ارسال شده"
-        media_file_id = update.message.photo[-1].file_id
-        media_type = "photo"
-    elif update.message.video:
-        question_text = update.message.caption or "ویدیو ارسال شده"
-        media_file_id = update.message.video.file_id
-        media_type = "video"
-    elif update.message.voice:
-        question_text = update.message.caption or "ویس ارسال شده"
-        media_file_id = update.message.voice.file_id
-        media_type = "voice"
-    elif update.message.document:
-        question_text = update.message.caption or "📎 فایل ارسال شده"
-        media_file_id = update.message.document.file_id
-        media_type = "document"
-    elif update.message.audio:
-        question_text = update.message.caption or "🎵 آهنگ ارسال شده"
-        media_file_id = update.message.audio.file_id
-        media_type = "audio"
-    elif update.message.animation:
-        question_text = update.message.caption or "🎬 GIF ارسال شده"
-        media_file_id = update.message.animation.file_id
-        media_type = "animation"
-    else:
-        await update.message.reply_text("لطفاً متن، عکس، ویدیو، ویس یا فایل ارسال کنید.")
-        return STUDENT_QUESTION
-
     if not course:
         await update.message.reply_text(MESSAGES["need_course"])
         return ConversationHandler.END
 
+    msg_data = _extract_message_data(update.message)
+    if not msg_data:
+        await update.message.reply_text("لطفاً متن، عکس، ویدیو، ویس یا فایل ارسال کنید.")
+        return STUDENT_QUESTION
+
+    pending = context.user_data.setdefault("pending_messages", [])
+    pending.append(msg_data)
+    count = len(pending)
+
+    # نمایش تعداد پیام‌های در صف و دکمه ارسال
+    send_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📤 ارسال سوال ({count} پیام)", callback_data="submit_question")],
+        [InlineKeyboardButton("🗑 پاک کردن و شروع مجدد", callback_data="clear_question")],
+    ])
+    await update.message.reply_text(
+        f"✅ پیام {count} در صف قرار گرفت.\n"
+        "می‌توانید پیام بیشتری اضافه کنید یا دکمه ارسال را بزنید.",
+        reply_markup=send_keyboard,
+    )
+    return STUDENT_QUESTION
+
+
+async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ارسال همه پیام‌های صف به گروه اساتید"""
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    course = context.user_data.get("selected_course")
+    pending = context.user_data.get("pending_messages", [])
+
+    if not pending:
+        await query.answer("⚠️ هیچ پیامی در صف نیست! ابتدا سوال خود را ارسال کنید.", show_alert=True)
+        return STUDENT_QUESTION
+
+    if not course:
+        await query.edit_message_text(MESSAGES["need_course"])
+        return ConversationHandler.END
+
     group_chat_id = db_get_group_chat_id()
     if not group_chat_id:
-        await update.message.reply_text(MESSAGES["group_not_set"])
+        await query.edit_message_text(MESSAGES["group_not_set"])
         return ConversationHandler.END
 
     question_id = str(uuid.uuid4())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     phone = context.user_data.get("phone", "")
 
+    # ساخت متن خلاصه سوال از همه پیام‌های متنی
+    texts = [m["text"] for m in pending if m.get("text")]
+    combined_text = " | ".join(t for t in texts if t) or f"({len(pending)} پیام رسانه‌ای)"
+
     question_data = {
         "student_id": user.id,
         "student_name": user.full_name,
         "student_phone": phone,
         "course": course,
-        "question": question_text,
+        "question": combined_text,
         "status": "open",
         "created_at": now,
         "group_message_id": None,
         "assigned_teacher_id": None,
         "assigned_teacher_name": None,
         "answer": None,
-        "media_file_id": media_file_id,
-        "media_type": media_type,
+        "media_file_id": None,
+        "media_type": None,
     }
 
-    group_message = (
-        f"سوال جدید ثبت شد:\n"
+    group_header = (
+        f"📬 سوال جدید ثبت شد:\n"
         f"👨‍🎓 دانشجو: {user.full_name}\n"
         + (f"📞 {phone}\n" if phone else "")
         + f"📚 دوره: {course}\n"
-        f"🕒 زمان: {now}\n\nسوال: {question_text}"
+        f"🕒 زمان: {now}\n"
+        f"📦 تعداد پیام‌ها: {len(pending)}\n\n"
+        f"سوال: {combined_text}"
     )
     keyboard = [
         [InlineKeyboardButton("✅ پاسخ می‌دهم", callback_data=f"answer:{question_id}")],
         [InlineKeyboardButton("❌ مربوط به این دوره نیست", callback_data=f"not_related:{question_id}")],
     ]
+
     try:
+        # ارسال پیام اصلی (header) به گروه
         msg = await context.bot.send_message(
-            chat_id=group_chat_id, text=group_message,
+            chat_id=group_chat_id, text=group_header,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         question_data["group_message_id"] = msg.message_id
-        if media_file_id and media_type:
+
+        # ارسال همه پیام‌های رسانه‌ای صف به گروه
+        for i, pm in enumerate(pending, 1):
+            fid = pm.get("media_file_id")
+            mt = pm.get("media_type")
+            caption = pm.get("text") or f"پیام {i}"
+            if not fid:
+                continue
             try:
-                if media_type == "photo":
-                    await context.bot.send_photo(chat_id=group_chat_id, photo=media_file_id, caption="📷 عکس سوال")
-                elif media_type == "video":
-                    await context.bot.send_video(chat_id=group_chat_id, video=media_file_id, caption="🎥 ویدیو سوال")
-                elif media_type == "voice":
-                    await context.bot.send_voice(chat_id=group_chat_id, voice=media_file_id, caption="🎙️ ویس سوال")
-                elif media_type == "document":
-                    await context.bot.send_document(chat_id=group_chat_id, document=media_file_id, caption="📎 فایل سوال")
-                elif media_type == "audio":
-                    await context.bot.send_audio(chat_id=group_chat_id, audio=media_file_id, caption="🎵 آهنگ سوال")
-                elif media_type == "animation":
-                    await context.bot.send_animation(chat_id=group_chat_id, animation=media_file_id, caption="🎬 GIF سوال")
+                if mt == "photo":
+                    await context.bot.send_photo(chat_id=group_chat_id, photo=fid, caption=f"📷 {caption}")
+                elif mt == "video":
+                    await context.bot.send_video(chat_id=group_chat_id, video=fid, caption=f"🎥 {caption}")
+                elif mt == "voice":
+                    await context.bot.send_voice(chat_id=group_chat_id, voice=fid, caption=f"🎙️ {caption}")
+                elif mt == "document":
+                    await context.bot.send_document(chat_id=group_chat_id, document=fid, caption=f"📎 {caption}")
+                elif mt == "audio":
+                    await context.bot.send_audio(chat_id=group_chat_id, audio=fid, caption=f"🎵 {caption}")
+                elif mt == "animation":
+                    await context.bot.send_animation(chat_id=group_chat_id, animation=fid, caption=f"🎬 {caption}")
             except Exception as e:
-                logger.error("خطا رسانه به گروه: %s", e)
+                logger.error("خطا ارسال رسانه %d به گروه: %s", i, e)
 
         db_save_question(question_id, question_data)
-        await update.message.reply_text(MESSAGES["question_sent"])
+
+        # پاک‌سازی صف
+        context.user_data["pending_messages"] = []
+
+        await query.edit_message_text(MESSAGES["question_sent"])
         try:
             await context.bot.send_message(
                 chat_id=user.id, text="در صورت داشتن سوال مجدد:",
@@ -1007,8 +1065,28 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
     except Exception as e:
         logger.error("خطا ارسال سوال: %s", e)
-        await update.message.reply_text(MESSAGES["question_send_failed"])
+        await query.edit_message_text(MESSAGES["question_send_failed"])
+
     return ConversationHandler.END
+
+
+async def clear_question_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """پاک کردن صف پیام‌ها"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["pending_messages"] = []
+    course = context.user_data.get("selected_course", "")
+    send_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 ارسال سوال", callback_data="submit_question")],
+        [InlineKeyboardButton("🗑 پاک کردن پیام‌ها", callback_data="clear_question")],
+    ])
+    await query.edit_message_text(
+        f"🗑 صف پیام‌ها پاک شد.\n\n"
+        f"دوره: {course}\n"
+        "می‌توانید سوال جدیدی ارسال کنید.",
+        reply_markup=send_keyboard,
+    )
+    return STUDENT_QUESTION
 
 
 async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1819,6 +1897,8 @@ def main() -> None:
             ],
             STUDENT_COURSE: [CallbackQueryHandler(course_selected, pattern=r"^course:")],
             STUDENT_QUESTION: [
+                CallbackQueryHandler(submit_question_callback, pattern=r"^submit_question$"),
+                CallbackQueryHandler(clear_question_callback, pattern=r"^clear_question$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question),
                 MessageHandler(filters.PHOTO, receive_question),
                 MessageHandler(filters.VIDEO, receive_question),
