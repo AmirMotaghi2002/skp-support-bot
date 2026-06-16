@@ -578,6 +578,18 @@ def db_delete_question(question_id: str) -> bool:
         return False
 
 
+def db_delete_all_questions() -> bool:
+    try:
+        conn = get_db_connection()
+        conn.run("DELETE FROM teacher_pending")
+        conn.run("DELETE FROM questions")
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در حذف کل تاریخچه سوالات: %s", e)
+        return False
+
+
 def db_set_teacher_pending(teacher_id: int, question_id: str) -> bool:
     try:
         conn = get_db_connection()
@@ -1884,11 +1896,33 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"ap:history:{page+1}"))
         if nav:
             buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🧹 حذف کل تاریخچه", callback_data="ap:clearallhistory")])
         buttons.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")])
 
         await query.edit_message_text(
             text,
             reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return ADMIN_MENU
+
+    if data == "ap:clearallhistory":
+        await query.edit_message_text(
+            "⚠️ آیا می‌خواهید تمام سوالات و تاریخچه‌ی آنها حذف شود؟\n\nاین عمل غیرقابل بازگشت است.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 بله، حذف کن", callback_data="ap:confirmclearhistory")],
+                [InlineKeyboardButton("❌ انصراف", callback_data="ap:history:0")],
+            ]),
+        )
+        return ADMIN_MENU
+
+    if data == "ap:confirmclearhistory":
+        if db_delete_all_questions():
+            result_text = "✅ تمام تاریخچه سوالات با موفقیت حذف شد."
+        else:
+            result_text = "❌ خطا در حذف کل تاریخچه سوالات. لطفاً دوباره تلاش کنید."
+        await query.edit_message_text(
+            result_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 بازگشت به منو", callback_data="ap:home")]]),
         )
         return ADMIN_MENU
 
