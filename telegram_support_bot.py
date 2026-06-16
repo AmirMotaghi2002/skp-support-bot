@@ -528,6 +528,56 @@ def db_update_question_status(question_id: str, status: str, **kwargs) -> bool:
         return False
 
 
+def db_list_questions(limit: int = 20, offset: int = 0) -> list:
+    try:
+        conn = get_db_connection()
+        rows = conn.run(
+            "SELECT id, student_name, student_phone, course, question, status, created_at, answer FROM questions "
+            "ORDER BY created_at DESC LIMIT :lim OFFSET :off",
+            lim=limit, off=offset
+        )
+        conn.close()
+        return [
+            {
+                "id": r[0],
+                "student_name": r[1],
+                "student_phone": r[2],
+                "course": r[3],
+                "question": r[4],
+                "status": r[5],
+                "created_at": r[6],
+                "answer": r[7],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error("خطا در دریافت تاریخچه سوالات: %s", e)
+        return []
+
+
+def db_count_questions() -> int:
+    try:
+        conn = get_db_connection()
+        rows = conn.run("SELECT COUNT(*) FROM questions")
+        conn.close()
+        return rows[0][0] if rows else 0
+    except Exception as e:
+        logger.error("خطا در شمارش سوالات: %s", e)
+        return 0
+
+
+def db_delete_question(question_id: str) -> bool:
+    try:
+        conn = get_db_connection()
+        conn.run("DELETE FROM teacher_pending WHERE question_id = :qid", qid=question_id)
+        conn.run("DELETE FROM questions WHERE id = :qid", qid=question_id)
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در حذف سوال: %s", e)
+        return False
+
+
 def db_set_teacher_pending(teacher_id: int, question_id: str) -> bool:
     try:
         conn = get_db_connection()
@@ -958,6 +1008,50 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(message)
 
 
+async def admin_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/history - نمایش تاریخچه سوالات"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+
+    questions = db_list_questions(limit=15)
+    if not questions:
+        await update.message.reply_text("📜 تاریخچه‌ای برای نمایش وجود ندارد.")
+        return
+
+    lines = ["📜 تاریخچه سوالات اخیر:\n"]
+    for q in questions:
+        created = str(q["created_at"])[:16]
+        answer_part = q["answer"] or "—"
+        lines.append(
+            f"🆔 {q['id']}\n👤 {q['student_name']} | 📚 {q['course']}\n"
+            f"🟡 وضعیت: {q['status']} | ⏱ {created}\n"
+            f"💬 {q['question'][:80]}{'...' if len(q['question']) > 80 else ''}\n"
+            f"📌 پاسخ: {answer_part[:60]}{'...' if len(answer_part) > 60 else ''}\n"
+            "\n"
+        )
+    text = "\n".join(lines)
+    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+        await update.message.reply_text(chunk)
+
+
+async def admin_delete_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/deletequestion <question_id>"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+
+    if not context.args:
+        await update.message.reply_text("فرمت صحیح: /deletequestion <question_id>")
+        return
+
+    question_id = context.args[0].strip()
+    if db_delete_question(question_id):
+        await update.message.reply_text(f"✅ سوال `{question_id}` حذف شد.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ حذف سوال `{question_id}` ناموفق بود.", parse_mode="Markdown")
+
+
 async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         db_set_setting("group_chat_id", str(update.effective_chat.id))
@@ -1276,6 +1370,7 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
     keyboard = [
         [InlineKeyboardButton("✅ پاسخ می‌دهم", callback_data=f"answer:{question_id}")],
         [InlineKeyboardButton("❌ مربوط به این دوره نیست", callback_data=f"not_related:{question_id}")],
+        [InlineKeyboardButton("🗑 حذف سوال", callback_data=f"delete:{question_id}")],
     ]
 
     try:
@@ -1358,6 +1453,15 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     question = db_get_question(question_id)
     if not question:
         await query.edit_message_text("این سوال موجود نیست.")
+        return
+    if action == "delete":
+        if not is_admin(query.from_user.id):
+            await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
+            return
+        if db_delete_question(question_id):
+            await query.edit_message_text("🗑️ این سوال توسط ادمین حذف شد.")
+        else:
+            await query.answer("❌ خطا در حذف سوال.", show_alert=True)
         return
     if question["status"] != "open":
         await query.answer("این سوال قبلاً بررسی شده است.", show_alert=True)
@@ -1639,6 +1743,7 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ افزودن کاراموز جدید", callback_data="ap:add")],
         [InlineKeyboardButton("🔍 جستجو / ویرایش کاراموز", callback_data="ap:search")],
         [InlineKeyboardButton("📋 لیست همه کاراموزان", callback_data="ap:list:0")],
+        [InlineKeyboardButton("📜 تاریخچه سوالات", callback_data="ap:history")],
         [InlineKeyboardButton("🗄 وضعیت دیتابیس", callback_data="ap:dbstatus")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="ap:close")],
     ])
@@ -1732,6 +1837,139 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(
             text, parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_MENU
+
+    # ---- تاریخچه سوالات ----
+    if data.startswith("ap:history"):
+        page = 0
+        parts = data.split(":")
+        if len(parts) > 2:
+            try:
+                page = int(parts[2])
+            except ValueError:
+                page = 0
+
+        PAGE_SIZE = 8
+        total = db_count_questions()
+        questions = db_list_questions(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+        if not questions:
+            await query.edit_message_text(
+                "📜 تاریخچه‌ای برای نمایش وجود ندارد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+            )
+            return ADMIN_MENU
+
+        rows = []
+        for idx, q in enumerate(questions, start=page * PAGE_SIZE + 1):
+            rows.append(
+                f"{idx}. {q['id']}\n"
+                f"👤 {q['student_name']} | 📚 {q['course']}\n"
+                f"🟢 وضعیت: {q['status']} | ⏱ {str(q['created_at'])[:16]}\n"
+                f"💬 {q['question'][:70]}{'...' if len(q['question']) > 70 else ''}"
+            )
+        text = "📜 تاریخچه سوالات\n\n" + "\n\n".join(rows)
+
+        buttons = []
+        for q in questions:
+            buttons.append([
+                InlineKeyboardButton(f"🔎 مشاهده {q['id'][-6:]}", callback_data=f"ap:viewquestion:{q['id']}:{page}"),
+                InlineKeyboardButton(f"🗑 حذف {q['id'][-6:]}", callback_data=f"ap:deletequestion:{q['id']}:{page}"),
+            ])
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"ap:history:{page-1}"))
+        if (page + 1) * PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"ap:history:{page+1}"))
+        if nav:
+            buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")])
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return ADMIN_MENU
+
+    if data.startswith("ap:viewquestion:"):
+        parts = data.split(":")
+        question_id = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        question = db_get_question(question_id)
+        if not question:
+            await query.edit_message_text(
+                "⚠️ سوال یافت نشد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به تاریخچه", callback_data=f"ap:history:{page}")]]),
+            )
+            return ADMIN_MENU
+
+        status_line = f"🟢 وضعیت: {question['status']}"
+        if question.get("assigned_teacher_name"):
+            status_line += f" | 👨‍🏫 {question['assigned_teacher_name']}"
+        if question.get("group_message_id"):
+            status_line += f" | 🧾 پیام گروه: {question['group_message_id']}"
+        created = str(question["created_at"])[:16]
+        text = (
+            f"🆔 {question['id']}\n"
+            f"👤 {question['student_name']} | 📞 {question['student_phone']}\n"
+            f"📚 {question['course']}\n"
+            f"{status_line}\n"
+            f"⏱ {created}\n\n"
+            f"💬 سوال:\n{question['question']}\n\n"
+            f"📌 پاسخ:\n{question.get('answer') or 'بدون پاسخ'}"
+        )
+        buttons = [
+            [InlineKeyboardButton("🗑 حذف سوال", callback_data=f"ap:deletequestion:{question_id}:{page}")],
+            [InlineKeyboardButton("🔙 بازگشت به تاریخچه", callback_data=f"ap:history:{page}")],
+            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="ap:home")],
+        ]
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return ADMIN_MENU
+
+    # ---- انتخاب حذف سوال ----
+    if data.startswith("ap:deletequestion:"):
+        parts = data.split(":")
+        question_id = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        question = db_get_question(question_id)
+        if not question:
+            await query.edit_message_text(
+                "⚠️ سوال یافت نشد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+            )
+            return ADMIN_MENU
+        cancel_cb = f"ap:history:{page}" if page else "ap:home"
+        await query.edit_message_text(
+            f"⚠️ آیا سوال زیر حذف شود؟\n\n"
+            f"🆔 `{question['id']}`\n"
+            f"👤 {question['student_name']}\n"
+            f"📚 {question['course']}\n"
+            f"🟡 وضعیت: {question['status']}\n",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 بله، حذف کن", callback_data=f"ap:confirmdelete:{question_id}:{page}" )],
+                [InlineKeyboardButton("❌ انصراف", callback_data=cancel_cb)],
+            ]),
+        )
+        return ADMIN_MENU
+
+    # ---- تایید حذف سوال ----
+    if data.startswith("ap:confirmdelete:"):
+        parts = data.split(":")
+        question_id = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        if db_delete_question(question_id):
+            text = f"✅ سوال `{question_id}` حذف شد."
+        else:
+            text = f"❌ خطا در حذف سوال `{question_id}`."
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به تاریخچه", callback_data=f"ap:history:{page}")]]),
         )
         return ADMIN_MENU
 
@@ -2286,9 +2524,11 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
     app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("history", admin_history))
+    app.add_handler(CommandHandler("deletequestion", admin_delete_question))
     app.add_handler(CommandHandler("pending", teacher_pending_questions))
     app.add_handler(CommandHandler("export", export_questions))
-    app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
+    app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related|delete):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, teacher_reply))
