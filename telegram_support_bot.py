@@ -143,6 +143,21 @@ MESSAGES = {
 
 STUDENT_PHONE, STUDENT_COURSE, STUDENT_QUESTION = range(3)
 
+# ====== state های پنل ادمین ======
+(
+    ADMIN_MENU,
+    ADMIN_ADD_PHONE,
+    ADMIN_ADD_FIRSTNAME,
+    ADMIN_ADD_LASTNAME,
+    ADMIN_ADD_COURSES,
+    ADMIN_CONFIRM_ADD,
+    ADMIN_SEARCH_PHONE,
+    ADMIN_EDIT_MENU,
+    ADMIN_EDIT_COURSES,
+    ADMIN_DELETE_CONFIRM,
+    ADMIN_LIST_PAGE,
+) = range(10, 21)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG,
@@ -1207,6 +1222,519 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # =====================================================
+# ====== پنل ادمین (مرحله به مرحله با InlineKeyboard) ======
+# =====================================================
+
+def _admin_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ افزودن کاراموز جدید", callback_data="ap:add")],
+        [InlineKeyboardButton("🔍 جستجو / ویرایش کاراموز", callback_data="ap:search")],
+        [InlineKeyboardButton("📋 لیست همه کاراموزان", callback_data="ap:list:0")],
+        [InlineKeyboardButton("🗄 وضعیت دیتابیس", callback_data="ap:dbstatus")],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="ap:close")],
+    ])
+
+
+def _courses_keyboard(selected: list) -> InlineKeyboardMarkup:
+    """کیبورد انتخاب دوره با تیک برای دوره‌های انتخاب‌شده"""
+    rows = []
+    for c in COURSES:
+        tick = "✅ " if c in selected else "⬜ "
+        rows.append([InlineKeyboardButton(tick + c, callback_data=f"apc:{c}")])
+    rows.append([
+        InlineKeyboardButton("✔️ تأیید انتخاب‌ها", callback_data="apc:__done__"),
+        InlineKeyboardButton("🔙 بازگشت", callback_data="apc:__back__"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ورودی پنل ادمین — دستور /panel"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["admin_mode"] = True
+
+    await update.message.reply_text(
+        "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+        parse_mode="Markdown",
+        reply_markup=_admin_main_keyboard(),
+    )
+    return ADMIN_MENU
+
+
+async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """هندل همه callback های پنل ادمین با prefix ap:"""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ دسترسی ندارید.")
+        return ConversationHandler.END
+
+    data = query.data  # ap:xxx
+
+    # ---- بستن پنل ----
+    if data == "ap:close":
+        await query.edit_message_text("✅ پنل ادمین بسته شد.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # ---- وضعیت دیتابیس ----
+    if data == "ap:dbstatus":
+        try:
+            count = db_count_interns()
+            conn = get_db_connection()
+            q_rows = conn.run("SELECT COUNT(*) FROM questions")
+            open_rows = conn.run("SELECT COUNT(*) FROM questions WHERE status = 'open'")
+            conn.close()
+            q_count = q_rows[0][0] if q_rows else 0
+            open_q = open_rows[0][0] if open_rows else 0
+            text = (
+                f"🗄 *وضعیت دیتابیس*\n\n"
+                f"👥 تعداد کاراموزان: {count}\n"
+                f"❓ کل سوالات: {q_count}\n"
+                f"🟡 سوالات باز: {open_q}\n"
+                f"✅ دیتابیس متصل است"
+            )
+        except Exception as e:
+            text = f"❌ خطا در اتصال:\n{e}"
+        await query.edit_message_text(
+            text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_MENU
+
+    # ---- بازگشت به منو اصلی ----
+    if data == "ap:home":
+        context.user_data.pop("new_intern", None)
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    # ---- شروع افزودن ----
+    if data == "ap:add":
+        context.user_data["new_intern"] = {}
+        await query.edit_message_text(
+            "➕ *افزودن کاراموز جدید*\n\n"
+            "📞 *مرحله ۱ از ۴:* شماره موبایل کاراموز را وارد کنید:\n"
+            "_(مثال: 09121234567)_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")]]),
+        )
+        return ADMIN_ADD_PHONE
+
+    # ---- جستجو ----
+    if data == "ap:search":
+        await query.edit_message_text(
+            "🔍 *جستجوی کاراموز*\n\n"
+            "شماره موبایل کاراموز را وارد کنید:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ap:home")]]),
+        )
+        return ADMIN_SEARCH_PHONE
+
+    # ---- لیست کاراموزان با صفحه‌بندی ----
+    if data.startswith("ap:list:"):
+        page = int(data.split(":")[-1])
+        PAGE_SIZE = 8
+        interns = db_list_interns()
+        total = len(interns)
+        if total == 0:
+            await query.edit_message_text(
+                "📋 هیچ کاراموزی ثبت نشده است.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ap:home")]]),
+            )
+            return ADMIN_MENU
+        start = page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        chunk = interns[start:end]
+        lines = [f"📋 *لیست کاراموزان* — صفحه {page+1} از {((total-1)//PAGE_SIZE)+1} ({total} نفر)\n"]
+        for i, intern in enumerate(chunk, start=start+1):
+            name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+            courses = (intern.get("courses") or "").replace("|", " | ")
+            lines.append(f"*{i}.* {name}\n   📞 `{intern['phone']}`\n   📚 {courses or '—'}\n")
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"ap:list:{page-1}"))
+        if end < total:
+            nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"ap:list:{page+1}"))
+        kb = []
+        if nav:
+            kb.append(nav)
+        kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")])
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return ADMIN_MENU
+
+    # ---- منوی ویرایش/حذف یک کاراموز ----
+    if data.startswith("ap:edit:"):
+        phone = data[len("ap:edit:"):]
+        intern = db_get_intern(phone)
+        if not intern:
+            await query.edit_message_text("⚠️ کاراموز یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ap:home")]]))
+            return ADMIN_MENU
+        name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+        courses_str = (intern.get("courses") or "").replace("|", "\n   • ")
+        context.user_data["edit_phone"] = phone
+        await query.edit_message_text(
+            f"✏️ *ویرایش کاراموز*\n\n"
+            f"👤 نام: {name}\n"
+            f"📞 شماره: `{phone}`\n"
+            f"📚 دوره‌های فعلی:\n   • {courses_str or '—'}\n\n"
+            f"چه کاری انجام دهید؟",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ ویرایش دوره‌ها", callback_data=f"ap:editcourses:{phone}")],
+                [InlineKeyboardButton("🗑 حذف کاراموز", callback_data=f"ap:askdelete:{phone}")],
+                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")],
+            ]),
+        )
+        return ADMIN_EDIT_MENU
+
+    # ---- شروع ویرایش دوره‌ها ----
+    if data.startswith("ap:editcourses:"):
+        phone = data[len("ap:editcourses:"):]
+        intern = db_get_intern(phone)
+        existing = [c.strip() for c in (intern.get("courses") or "").split("|") if c.strip()] if intern else []
+        context.user_data["edit_phone"] = phone
+        context.user_data["edit_courses"] = existing.copy()
+        await query.edit_message_text(
+            f"📚 *ویرایش دوره‌های کاراموز*\n"
+            f"شماره: `{phone}`\n\n"
+            "دوره‌های مورد نظر را انتخاب یا حذف کنید:",
+            parse_mode="Markdown",
+            reply_markup=_courses_keyboard(existing),
+        )
+        return ADMIN_EDIT_COURSES
+
+    # ---- تأیید حذف ----
+    if data.startswith("ap:askdelete:"):
+        phone = data[len("ap:askdelete:"):]
+        intern = db_get_intern(phone)
+        name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip() if intern else phone
+        await query.edit_message_text(
+            f"⚠️ *آیا مطمئن هستید؟*\n\n"
+            f"کاراموز *{name}* (`{phone}`) حذف شود؟\n\n"
+            "این عمل قابل بازگشت نیست!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 بله، حذف شود", callback_data=f"ap:doDelete:{phone}")],
+                [InlineKeyboardButton("❌ انصراف", callback_data=f"ap:edit:{phone}")],
+            ]),
+        )
+        return ADMIN_DELETE_CONFIRM
+
+    # ---- اجرای حذف ----
+    if data.startswith("ap:doDelete:"):
+        phone = data[len("ap:doDelete:"):]
+        if db_remove_intern(phone):
+            msg = f"✅ کاراموز `{phone}` با موفقیت حذف شد."
+        else:
+            msg = f"⚠️ شماره `{phone}` در سیستم یافت نشد."
+        await query.edit_message_text(
+            msg, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_MENU
+
+    return ADMIN_MENU
+
+
+async def admin_add_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت شماره کاراموز جدید"""
+    phone_raw = update.message.text.strip()
+    phone = normalize_phone(phone_raw)
+    if not (phone.startswith("09") and len(phone) == 11 and phone.isdigit()):
+        await update.message.reply_text(
+            "⚠️ شماره وارد شده معتبر نیست!\n"
+            "شماره باید ۱۱ رقم و با ۰۹ شروع شود.\n\nمجدداً وارد کنید:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")]]),
+        )
+        return ADMIN_ADD_PHONE
+
+    context.user_data["new_intern"]["phone"] = phone
+    # بررسی وجود قبلی
+    existing = db_get_intern(phone)
+    if existing:
+        name = f"{existing.get('first_name','')} {existing.get('last_name','')}".strip()
+        courses_str = (existing.get("courses") or "").replace("|", " | ")
+        await update.message.reply_text(
+            f"⚠️ این شماره قبلاً ثبت شده است:\n\n"
+            f"👤 نام: {name}\n"
+            f"📞 شماره: `{phone}`\n"
+            f"📚 دوره‌ها: {courses_str or '—'}\n\n"
+            "اگر ادامه دهید، اطلاعات *بازنویسی* می‌شود.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ادامه و بازنویسی", callback_data="ap:continue_add")],
+                [InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")],
+            ]),
+        )
+        return ADMIN_ADD_PHONE  # منتظر callback می‌مانیم
+
+    await update.message.reply_text(
+        f"✅ شماره: `{phone}`\n\n"
+        "👤 *مرحله ۲ از ۴:* نام *کوچک* کاراموز را وارد کنید:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")]]),
+    )
+    return ADMIN_ADD_FIRSTNAME
+
+
+async def admin_continue_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ادامه افزودن پس از تأیید بازنویسی"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        f"✅ شماره: `{context.user_data['new_intern']['phone']}`\n\n"
+        "👤 *مرحله ۲ از ۴:* نام *کوچک* کاراموز را وارد کنید:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")]]),
+    )
+    return ADMIN_ADD_FIRSTNAME
+
+
+async def admin_add_firstname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت نام کوچک"""
+    first_name = update.message.text.strip()
+    if len(first_name) < 2:
+        await update.message.reply_text("⚠️ نام خیلی کوتاه است. مجدداً وارد کنید:")
+        return ADMIN_ADD_FIRSTNAME
+    context.user_data["new_intern"]["first_name"] = first_name
+    await update.message.reply_text(
+        f"✅ نام: *{first_name}*\n\n"
+        "👤 *مرحله ۳ از ۴:* نام *خانوادگی* کاراموز را وارد کنید:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")]]),
+    )
+    return ADMIN_ADD_LASTNAME
+
+
+async def admin_add_lastname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت نام خانوادگی"""
+    last_name = update.message.text.strip()
+    if len(last_name) < 2:
+        await update.message.reply_text("⚠️ نام خانوادگی خیلی کوتاه است. مجدداً وارد کنید:")
+        return ADMIN_ADD_LASTNAME
+    context.user_data["new_intern"]["last_name"] = last_name
+    intern = context.user_data["new_intern"]
+    await update.message.reply_text(
+        f"✅ نام کامل: *{intern['first_name']} {last_name}*\n\n"
+        "📚 *مرحله ۴ از ۴:* دوره‌های مجاز را انتخاب کنید:\n"
+        "_(می‌توانید چند دوره انتخاب کنید)_",
+        parse_mode="Markdown",
+        reply_markup=_courses_keyboard([]),
+    )
+    context.user_data["new_intern"]["last_name"] = last_name
+    context.user_data["new_intern"]["courses"] = []
+    return ADMIN_ADD_COURSES
+
+
+async def admin_add_courses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """toggle انتخاب دوره در مرحله افزودن"""
+    query = update.callback_query
+    await query.answer()
+    course = query.data[len("apc:"):]
+    intern = context.user_data.get("new_intern", {})
+    selected = intern.get("courses", [])
+
+    if course == "__back__":
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    if course == "__done__":
+        if not selected:
+            await query.answer("⚠️ حداقل یک دوره انتخاب کنید!", show_alert=True)
+            return ADMIN_ADD_COURSES
+        # نمایش خلاصه و تأیید
+        courses_list = "\n".join(f"   ✅ {c}" for c in selected)
+        await query.edit_message_text(
+            f"📋 *تأیید اطلاعات کاراموز جدید*\n\n"
+            f"📞 شماره: `{intern['phone']}`\n"
+            f"👤 نام: *{intern['first_name']} {intern['last_name']}*\n"
+            f"📚 دوره‌ها:\n{courses_list}\n\n"
+            "آیا اطلاعات صحیح است؟",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ ثبت نهایی", callback_data="ap:doAdd")],
+                [InlineKeyboardButton("✏️ ویرایش دوره‌ها", callback_data="ap:redo_courses")],
+                [InlineKeyboardButton("🔙 انصراف", callback_data="ap:home")],
+            ]),
+        )
+        return ADMIN_CONFIRM_ADD
+
+    # toggle
+    if course in selected:
+        selected.remove(course)
+    else:
+        selected.append(course)
+    context.user_data["new_intern"]["courses"] = selected
+    await query.edit_message_text(
+        f"📚 *مرحله ۴ از ۴:* دوره‌های مجاز را انتخاب کنید:\n"
+        f"_(انتخاب شده: {len(selected)} دوره)_",
+        parse_mode="Markdown",
+        reply_markup=_courses_keyboard(selected),
+    )
+    return ADMIN_ADD_COURSES
+
+
+async def admin_confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """callback های صفحه تأیید افزودن"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    intern = context.user_data.get("new_intern", {})
+
+    if data == "ap:redo_courses":
+        selected = intern.get("courses", [])
+        await query.edit_message_text(
+            "📚 دوره‌ها را مجدداً انتخاب کنید:",
+            reply_markup=_courses_keyboard(selected),
+        )
+        return ADMIN_ADD_COURSES
+
+    if data == "ap:doAdd":
+        phone = intern.get("phone", "")
+        first_name = intern.get("first_name", "")
+        last_name = intern.get("last_name", "")
+        courses = intern.get("courses", [])
+        if db_add_intern(phone, first_name, last_name, courses):
+            courses_list = "\n".join(f"   ✅ {c}" for c in courses)
+            await query.edit_message_text(
+                f"🎉 *کاراموز با موفقیت ثبت شد!*\n\n"
+                f"📞 شماره: `{phone}`\n"
+                f"👤 نام: *{first_name} {last_name}*\n"
+                f"📚 دوره‌ها:\n{courses_list}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ افزودن کاراموز دیگر", callback_data="ap:add")],
+                    [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")],
+                ]),
+            )
+            context.user_data.pop("new_intern", None)
+        else:
+            await query.edit_message_text(
+                "❌ خطا در ثبت. لطفاً مجدداً امتحان کنید.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+            )
+        return ADMIN_MENU
+
+    if data == "ap:home":
+        context.user_data.pop("new_intern", None)
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    return ADMIN_CONFIRM_ADD
+
+
+async def admin_search_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت شماره برای جستجو"""
+    phone_raw = update.message.text.strip()
+    phone = normalize_phone(phone_raw)
+    intern = db_get_intern(phone)
+    if not intern:
+        await update.message.reply_text(
+            f"⚠️ کاراموزی با شماره `{phone}` یافت نشد.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 جستجوی مجدد", callback_data="ap:search")],
+                [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")],
+            ]),
+        )
+        return ADMIN_MENU
+    name = f"{intern.get('first_name','')} {intern.get('last_name','')}".strip()
+    courses_str = (intern.get("courses") or "").replace("|", "\n   • ")
+    created = str(intern.get("created_at", ""))[:19]
+    await update.message.reply_text(
+        f"🔍 *نتیجه جستجو*\n\n"
+        f"👤 نام: *{name}*\n"
+        f"📞 شماره: `{phone}`\n"
+        f"📚 دوره‌ها:\n   • {courses_str or '—'}\n"
+        f"🗓 تاریخ ثبت: {created}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ ویرایش / حذف", callback_data=f"ap:edit:{phone}")],
+            [InlineKeyboardButton("🔍 جستجوی دیگر", callback_data="ap:search")],
+            [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")],
+        ]),
+    )
+    return ADMIN_MENU
+
+
+async def admin_edit_courses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """toggle دوره‌ها در حالت ویرایش"""
+    query = update.callback_query
+    await query.answer()
+    course = query.data[len("apc:"):]
+    phone = context.user_data.get("edit_phone", "")
+    selected = context.user_data.get("edit_courses", [])
+
+    if course == "__back__":
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    if course == "__done__":
+        if not selected:
+            await query.answer("⚠️ حداقل یک دوره انتخاب کنید!", show_alert=True)
+            return ADMIN_EDIT_COURSES
+        intern = db_get_intern(phone)
+        first_name = intern.get("first_name", "") if intern else ""
+        last_name = intern.get("last_name", "") if intern else ""
+        if db_add_intern(phone, first_name, last_name, selected):
+            courses_list = "\n".join(f"   ✅ {c}" for c in selected)
+            await query.edit_message_text(
+                f"✅ *دوره‌های کاراموز بروزرسانی شد!*\n\n"
+                f"👤 نام: *{first_name} {last_name}*\n"
+                f"📞 شماره: `{phone}`\n"
+                f"📚 دوره‌های جدید:\n{courses_list}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ ویرایش مجدد", callback_data=f"ap:edit:{phone}")],
+                    [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")],
+                ]),
+            )
+        else:
+            await query.edit_message_text(
+                "❌ خطا در بروزرسانی.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="ap:home")]]),
+            )
+        return ADMIN_MENU
+
+    # toggle
+    if course in selected:
+        selected.remove(course)
+    else:
+        selected.append(course)
+    context.user_data["edit_courses"] = selected
+    await query.edit_message_text(
+        f"📚 دوره‌های کاراموز را ویرایش کنید:\n_(انتخاب شده: {len(selected)} دوره)_",
+        parse_mode="Markdown",
+        reply_markup=_courses_keyboard(selected),
+    )
+    return ADMIN_EDIT_COURSES
+
+
+# =====================================================
 # ====== main ======
 # =====================================================
 
@@ -1217,13 +1745,67 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # دستورات ادمین
+    # دستورات ادمین (متنی — قدیمی، هنوز کار می‌کنند)
     app.add_handler(CommandHandler("admin", admin_help))
     app.add_handler(CommandHandler("adduser", admin_add_user))
     app.add_handler(CommandHandler("removeuser", admin_remove_user))
     app.add_handler(CommandHandler("listusers", admin_list_users))
     app.add_handler(CommandHandler("searchuser", admin_search_user))
     app.add_handler(CommandHandler("dbstatus", admin_db_status))
+
+    # ====== پنل ادمین گرافیکی (مرحله به مرحله) ======
+    admin_panel_conv = ConversationHandler(
+        entry_points=[CommandHandler("panel", admin_panel)],
+        states={
+            ADMIN_MENU: [
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
+            ],
+            ADMIN_ADD_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_phone),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+                CallbackQueryHandler(admin_continue_add_callback, pattern=r"^ap:continue_add$"),
+            ],
+            ADMIN_ADD_FIRSTNAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_firstname),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+            ],
+            ADMIN_ADD_LASTNAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_lastname),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+            ],
+            ADMIN_ADD_COURSES: [
+                CallbackQueryHandler(admin_add_courses_callback, pattern=r"^apc:"),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+            ],
+            ADMIN_CONFIRM_ADD: [
+                CallbackQueryHandler(admin_confirm_add_callback, pattern=r"^ap:(doAdd|redo_courses|home)$"),
+            ],
+            ADMIN_SEARCH_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_search_phone),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
+            ],
+            ADMIN_EDIT_MENU: [
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
+            ],
+            ADMIN_EDIT_COURSES: [
+                CallbackQueryHandler(admin_edit_courses_callback, pattern=r"^apc:"),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+            ],
+            ADMIN_DELETE_CONFIRM: [
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
+            ],
+            ADMIN_LIST_PAGE: [
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("panel", admin_panel),
+            CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:close$"),
+        ],
+        per_user=True,
+        per_chat=True,
+    )
+    app.add_handler(admin_panel_conv)
 
     conv_handler = ConversationHandler(
         entry_points=[
