@@ -1091,6 +1091,24 @@ async def ask_again_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return STUDENT_COURSE
 
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await update.message.reply_text("لطفاً در چت خصوصی با من /start را ارسال کنید.")
+        return ConversationHandler.END
+
+    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
+    if is_admin(update.effective_user.id):
+        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
+
+    await update.message.reply_text(MESSAGES["welcome"], reply_markup=InlineKeyboardMarkup(buttons))
+    try:
+        restart_kb = ReplyKeyboardMarkup([[KeyboardButton(RESTART_LABEL)]], resize_keyboard=True, one_time_keyboard=False)
+        await context.bot.send_message(chat_id=update.effective_user.id, text="برای شروع سریع دکمه را بزنید:", reply_markup=restart_kb)
+    except Exception:
+        pass
+    return STUDENT_PHONE
+
+
 async def start_register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
