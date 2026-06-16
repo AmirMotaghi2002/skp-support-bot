@@ -144,7 +144,13 @@ MESSAGES = {
         "/searchuser 09xxxxxxxxx\n"
         "   🔍 جستجوی کاراموز با شماره\n\n"
         "/dbstatus\n"
-        "   🗄 وضعیت دیتابیس"
+        "   🗄 وضعیت دیتابیس\n\n"
+        "/addteacher <tg_id> نام نمایشی\n"
+        "   ➕ ثبت یا ویرایش نام نمایشی استاد\n\n"
+        "/removeteacher <tg_id>\n"
+        "   ➖ حذف نام نمایشی استاد\n\n"
+        "/listteachers\n"
+        "   📋 لیست استادان ثبت‌شده"
     ),
 }
 
@@ -163,7 +169,8 @@ STUDENT_PHONE, STUDENT_COURSE, STUDENT_QUESTION = range(3)
     ADMIN_EDIT_COURSES,
     ADMIN_DELETE_CONFIRM,
     ADMIN_LIST_PAGE,
-) = range(10, 21)
+    ADMIN_ADD_AVAILABLE_COURSE,
+) = range(10, 22)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -299,6 +306,15 @@ def init_db():
             )
         """)
 
+        # جدول پروفایل اساتید با نام نمایشی
+        conn.run("""
+            CREATE TABLE IF NOT EXISTS teachers (
+                teacher_id BIGINT PRIMARY KEY,
+                display_name VARCHAR(200),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         # اضافه کردن ستون‌های جدید (برای migration از DB قدیمی)
         try:
             conn.run("ALTER TABLE questions ADD COLUMN answered_at TIMESTAMP;")
@@ -357,6 +373,61 @@ def db_get_allowed_courses(phone: str) -> list | None:
         return None
     courses_str = intern.get("courses") or ""
     return [c.strip() for c in courses_str.split("|") if c.strip()]
+
+
+def db_get_teacher_display_name(teacher_id: int) -> str | None:
+    try:
+        conn = get_db_connection()
+        rows = conn.run(
+            "SELECT display_name FROM teachers WHERE teacher_id = :tid",
+            tid=teacher_id,
+        )
+        conn.close()
+        return rows[0][0] if rows else None
+    except Exception as e:
+        logger.error("خطا در دریافت نام نمایشی استاد: %s", e)
+        return None
+
+
+def db_set_teacher_profile(teacher_id: int, display_name: str) -> bool:
+    try:
+        conn = get_db_connection()
+        conn.run(
+            """
+            INSERT INTO teachers (teacher_id, display_name, updated_at)
+            VALUES (:tid, :name, NOW())
+            ON CONFLICT (teacher_id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW()
+            """,
+            tid=teacher_id,
+            name=display_name,
+        )
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در ذخیره نام نمایشی استاد: %s", e)
+        return False
+
+
+def db_remove_teacher_profile(teacher_id: int) -> bool:
+    try:
+        conn = get_db_connection()
+        conn.run("DELETE FROM teachers WHERE teacher_id = :tid", tid=teacher_id)
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در حذف نام نمایشی استاد: %s", e)
+        return False
+
+
+def db_list_teachers() -> list:
+    try:
+        conn = get_db_connection()
+        rows = conn.run("SELECT teacher_id, display_name FROM teachers ORDER BY display_name")
+        conn.close()
+        return [{"teacher_id": r[0], "display_name": r[1]} for r in rows]
+    except Exception as e:
+        logger.error("خطا در دریافت لیست اساتید: %s", e)
+        return []
 
 
 def db_add_intern(phone: str, first_name: str, last_name: str, courses: list) -> bool:
@@ -444,6 +515,22 @@ def db_set_setting(key: str, value: str) -> bool:
     except Exception as e:
         logger.error("خطا در ذخیره تنظیمات: %s", e)
         return False
+
+
+def db_get_available_courses() -> list:
+    value = db_get_setting("available_courses")
+    if value:
+        try:
+            courses = json.loads(value)
+            if isinstance(courses, list):
+                return [c.strip() for c in courses if isinstance(c, str) and c.strip()]
+        except Exception:
+            pass
+    return COURSES.copy()
+
+
+def db_set_available_courses(courses: list) -> bool:
+    return db_set_setting("available_courses", json.dumps(courses, ensure_ascii=False))
 
 
 # ====== توابع سوالات ======
@@ -818,7 +905,7 @@ def is_admin(user_id: int) -> bool:
 
 
 def build_course_keyboard(allowed_courses=None) -> list:
-    courses = allowed_courses if allowed_courses is not None else COURSES
+    courses = allowed_courses if allowed_courses is not None else db_get_available_courses()
     return [[InlineKeyboardButton(c, callback_data=f"course:{c}")] for c in courses]
 
 
@@ -878,9 +965,10 @@ async def admin_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ حداقل یک دوره باید وارد شود.")
         return
 
-    invalid = [c for c in courses if c not in COURSES]
+    available_courses = db_get_available_courses()
+    invalid = [c for c in courses if c not in available_courses]
     if invalid:
-        courses_list = "\n".join(f"• {c}" for c in COURSES)
+        courses_list = "\n".join(f"• {c}" for c in available_courses)
         await update.message.reply_text(
             f"⚠️ دوره‌های نامعتبر:\n{', '.join(invalid)}\n\nدوره‌های مجاز:\n{courses_list}"
         )
@@ -912,6 +1000,65 @@ async def admin_remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"✅ کاراموز {phone} حذف شد.")
     else:
         await update.message.reply_text(f"⚠️ شماره {phone} در سیستم یافت نشد.")
+
+
+async def admin_add_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/addteacher <tg_id> نام نمایشی"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("فرمت: /addteacher <tg_id> نام نمایشی")
+        return
+    try:
+        teacher_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("شناسه استاد معتبر نیست. لطفاً عدد وارد کنید.")
+        return
+    display_name = " ".join(args[1:]).strip()
+    if not display_name:
+        await update.message.reply_text("نام نمایشی خالی است. لطفاً دوباره وارد کنید.")
+        return
+    if db_set_teacher_profile(teacher_id, display_name):
+        await update.message.reply_text(f"✅ استاد با نام نمایشی '{display_name}' ثبت شد.")
+    else:
+        await update.message.reply_text("❌ خطا در ثبت استاد. لطفاً دوباره تلاش کنید.")
+
+
+async def admin_remove_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/removeteacher <tg_id>"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text("فرمت: /removeteacher <tg_id>")
+        return
+    try:
+        teacher_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("شناسه استاد معتبر نیست. لطفاً عدد وارد کنید.")
+        return
+    if db_remove_teacher_profile(teacher_id):
+        await update.message.reply_text(MESSAGES.get("teacher_removed", "✅ استاد حذف شد."))
+    else:
+        await update.message.reply_text("❌ خطا در حذف استاد. لطفاً دوباره تلاش کنید.")
+
+
+async def admin_list_teachers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/listteachers"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+    teachers = db_list_teachers()
+    if not teachers:
+        await update.message.reply_text("📋 هیچ استادی ثبت نشده است.")
+        return
+    lines = ["📋 لیست اساتید ثبت‌شده:\n"]
+    for t in teachers:
+        lines.append(f"🆔 {t['teacher_id']} — {t['display_name']}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def admin_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1480,14 +1627,15 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if action == "answer":
         teacher = update.effective_user
+        display_name = db_get_teacher_display_name(teacher.id) or "استاد پشتیبانی"
         db_update_question_status(
             question_id, "assigned",
             assigned_teacher_id=teacher.id,
-            assigned_teacher_name=teacher.full_name
+            assigned_teacher_name=display_name
         )
         db_set_teacher_pending(teacher.id, question_id)
         await query.edit_message_text(
-            query.message.text + "\n\n" + MESSAGES["selected_answer"].format(teacher=teacher.full_name)
+            query.message.text + "\n\n" + MESSAGES["selected_answer"].format(teacher=display_name)
         )
         try:
             await context.bot.send_message(
@@ -1755,7 +1903,8 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ افزودن کاراموز جدید", callback_data="ap:add")],
         [InlineKeyboardButton("🔍 جستجو / ویرایش کاراموز", callback_data="ap:search")],
         [InlineKeyboardButton("📋 لیست همه کاراموزان", callback_data="ap:list:0")],
-        [InlineKeyboardButton("📜 تاریخچه سوالات", callback_data="ap:history")],
+        [InlineKeyboardButton("� مدیریت دوره‌ها", callback_data="ap:courses")],
+        [InlineKeyboardButton("�📜 تاریخچه سوالات", callback_data="ap:history")],
         [InlineKeyboardButton("🗄 وضعیت دیتابیس", callback_data="ap:dbstatus")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="ap:close")],
     ])
@@ -1764,7 +1913,11 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
 def _courses_keyboard(selected: list) -> InlineKeyboardMarkup:
     """کیبورد انتخاب دوره با تیک برای دوره‌های انتخاب‌شده"""
     rows = []
-    for c in COURSES:
+    courses = db_get_available_courses()
+    for c in selected:
+        if c not in courses:
+            courses.append(c)
+    for c in courses:
         tick = "✅ " if c in selected else "⬜ "
         rows.append([InlineKeyboardButton(tick + c, callback_data=f"apc:{c}")])
     rows.append([
@@ -1850,6 +2003,60 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             text, parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
         )
+        return ADMIN_MENU
+
+    # ---- مدیریت دوره‌های موجود ----
+    if data == "ap:courses":
+        courses = db_get_available_courses()
+        if courses:
+            text = (
+                "📚 *مدیریت دوره‌های موجود*\n\n"
+                + "\n".join(f"{i+1}. {c}" for i, c in enumerate(courses))
+            )
+        else:
+            text = "📚 *مدیریت دوره‌های موجود*\n\nهیچ دوره‌ای ثبت نشده است."
+        buttons = [[InlineKeyboardButton("➕ افزودن دوره جدید", callback_data="ap:add_course")]]
+        for idx, course in enumerate(courses):
+            buttons.append([InlineKeyboardButton(f"🗑 حذف {course}", callback_data=f"ap:remove_course:{idx}")])
+        buttons.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")])
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return ADMIN_MENU
+
+    if data == "ap:add_course":
+        await query.edit_message_text(
+            "➕ *افزودن دوره جدید*\n\n"
+            "لطفاً نام دوره را ارسال کنید:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_ADD_AVAILABLE_COURSE
+
+    if data.startswith("ap:remove_course:"):
+        parts = data.split(":", 2)
+        try:
+            index = int(parts[2])
+        except Exception:
+            index = None
+        courses = db_get_available_courses()
+        if index is None or index < 0 or index >= len(courses):
+            await query.answer("خطا: دوره پیدا نشد.", show_alert=True)
+            return ADMIN_MENU
+        removed_course = courses.pop(index)
+        db_set_available_courses(courses)
+        text = (
+            f"✅ دوره «{removed_course}» حذف شد.\n\n"
+            "📚 دوره‌های موجود اکنون:\n\n"
+            + ("\n".join(f"{i+1}. {c}" for i, c in enumerate(courses)) if courses else "هیچ دوره‌ای ثبت نشده است.")
+        )
+        buttons = [[InlineKeyboardButton("➕ افزودن دوره جدید", callback_data="ap:add_course")]]
+        for idx, course in enumerate(courses):
+            buttons.append([InlineKeyboardButton(f"🗑 حذف {course}", callback_data=f"ap:remove_course:{idx}")])
+        buttons.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
         return ADMIN_MENU
 
     # ---- تاریخچه سوالات ----
@@ -2302,6 +2509,37 @@ async def admin_add_courses_callback(update: Update, context: ContextTypes.DEFAU
     return ADMIN_ADD_COURSES
 
 
+async def admin_add_available_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    course_name = update.message.text.strip()
+    if not course_name:
+        await update.message.reply_text(
+            "⚠️ نام دوره خالی است. لطفاً دوباره وارد کنید:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_ADD_AVAILABLE_COURSE
+
+    courses = db_get_available_courses()
+    if course_name in courses:
+        await update.message.reply_text(
+            f"⚠️ دوره «{course_name}» قبلاً وجود دارد. لطفاً نام دیگری وارد کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+        return ADMIN_ADD_AVAILABLE_COURSE
+
+    courses.append(course_name)
+    if db_set_available_courses(courses):
+        await update.message.reply_text(
+            f"✅ دوره جدید «{course_name}» اضافه شد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به مدیریت دوره‌ها", callback_data="ap:courses")]]),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ خطا در ذخیره دوره. لطفاً دوباره تلاش کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="ap:home")]]),
+        )
+    return ADMIN_MENU
+
+
 async def admin_confirm_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """callback های صفحه تأیید افزودن"""
     query = update.callback_query
@@ -2492,6 +2730,10 @@ def main() -> None:
                 CallbackQueryHandler(admin_add_courses_callback, pattern=r"^apc:"),
                 CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
             ],
+            ADMIN_ADD_AVAILABLE_COURSE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_available_course),
+                CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:home$"),
+            ],
             ADMIN_CONFIRM_ADD: [
                 CallbackQueryHandler(admin_confirm_add_callback, pattern=r"^ap:(doAdd|redo_courses|home)$"),
             ],
@@ -2560,6 +2802,9 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("history", admin_history))
     app.add_handler(CommandHandler("deletequestion", admin_delete_question))
+    app.add_handler(CommandHandler("addteacher", admin_add_teacher))
+    app.add_handler(CommandHandler("removeteacher", admin_remove_teacher))
+    app.add_handler(CommandHandler("listteachers", admin_list_teachers))
     app.add_handler(CommandHandler("pending", teacher_pending_questions))
     app.add_handler(CommandHandler("export", export_questions))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related|delete):"))
