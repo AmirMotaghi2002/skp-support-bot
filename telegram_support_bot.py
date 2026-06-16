@@ -26,11 +26,6 @@ except ImportError:
     print("pg8000 با موفقیت نصب شد.")
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-MAIN_MENU = ReplyKeyboardMarkup(
-    [["🚀 شروع درخواست جدید"]],
-    resize_keyboard=True,
-    persistent=True
-)
 from telegram.constants import ChatType
 from telegram.ext import (
     ApplicationBuilder,
@@ -868,19 +863,7 @@ async def start_register_callback(update: Update, context: ContextTypes.DEFAULT_
     except Exception:
         pass
     return STUDENT_PHONE
-async def restart_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("ارسال شماره", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
 
-    await update.message.reply_text(
-        "لطفاً شماره تلفن خود را ارسال کنید.",
-        reply_markup=kb
-    )
-
-    return STUDENT_PHONE
 
 async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
