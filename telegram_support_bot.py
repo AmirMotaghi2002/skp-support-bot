@@ -275,6 +275,7 @@ def init_db():
                 question TEXT,
                 status VARCHAR(50) DEFAULT 'open',
                 created_at TIMESTAMP DEFAULT NOW(),
+                answered_at TIMESTAMP,
                 group_message_id BIGINT,
                 assigned_teacher_id BIGINT,
                 assigned_teacher_name VARCHAR(200),
@@ -282,7 +283,10 @@ def init_db():
                 media_file_id VARCHAR(500),
                 media_type VARCHAR(50),
                 answer_media_file_id VARCHAR(500),
-                answer_media_type VARCHAR(50)
+                answer_media_type VARCHAR(50),
+                answer_rating INTEGER,
+                rating_comment TEXT,
+                reminder_sent BOOLEAN DEFAULT FALSE
             )
         """)
 
@@ -294,6 +298,24 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT NOW()
             )
         """)
+
+        # اضافه کردن ستون‌های جدید (برای migration از DB قدیمی)
+        try:
+            conn.run("ALTER TABLE questions ADD COLUMN answered_at TIMESTAMP;")
+        except Exception:
+            pass
+        try:
+            conn.run("ALTER TABLE questions ADD COLUMN answer_rating INTEGER;")
+        except Exception:
+            pass
+        try:
+            conn.run("ALTER TABLE questions ADD COLUMN rating_comment TEXT;")
+        except Exception:
+            pass
+        try:
+            conn.run("ALTER TABLE questions ADD COLUMN reminder_sent BOOLEAN DEFAULT FALSE;")
+        except Exception:
+            pass
 
         conn.close()
         logger.info("✅ دیتابیس با موفقیت راه‌اندازی شد")
@@ -548,10 +570,66 @@ def db_get_group_chat_id() -> str | None:
     return val or DEFAULT_GROUP_CHAT_ID
 
 
+def db_rate_answer(question_id: str, rating: int, comment: str = "") -> bool:
+    """ثبت امتیاز و نظر برای پاسخ"""
+    try:
+        conn = get_db_connection()
+        conn.run(
+            "UPDATE questions SET answer_rating = :rating, rating_comment = :comment WHERE id = :qid",
+            rating=rating, comment=comment, qid=question_id
+        )
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error("خطا در رتینگ: %s", e)
+        return False
 
-# =====================================================
-# ====== توابع کمکی ======
-# =====================================================
+
+def db_get_stats() -> dict:
+    """دریافت آمار کلی سوالات"""
+    try:
+        conn = get_db_connection()
+        
+        # کل سوالات
+        total = conn.run("SELECT COUNT(*) FROM questions")
+        total_questions = total[0][0] if total else 0
+        
+        # سوالات پاسخ شده
+        answered = conn.run("SELECT COUNT(*) FROM questions WHERE status = 'answered'")
+        answered_questions = answered[0][0] if answered else 0
+        
+        # سوالات باز
+        open_q = conn.run("SELECT COUNT(*) FROM questions WHERE status = 'open'")
+        open_questions = open_q[0][0] if open_q else 0
+        
+        # میانگین زمان پاسخ (ساعت)
+        avg_time = conn.run("""
+            SELECT AVG(EXTRACT(EPOCH FROM (answered_at - created_at))/3600)
+            FROM questions WHERE answered_at IS NOT NULL
+        """)
+        avg_hours = float(avg_time[0][0]) if avg_time and avg_time[0][0] else 0
+        
+        # امتیاز میانگین
+        avg_rating = conn.run("SELECT AVG(answer_rating) FROM questions WHERE answer_rating IS NOT NULL")
+        avg_rate = float(avg_rating[0][0]) if avg_rating and avg_rating[0][0] else 0
+        
+        # سوالات به تفکیک دوره
+        courses = conn.run("SELECT course, COUNT(*) FROM questions GROUP BY course ORDER BY COUNT(*) DESC")
+        course_stats = {row[0]: row[1] for row in courses} if courses else {}
+        
+        conn.close()
+        
+        return {
+            "total": total_questions,
+            "answered": answered_questions,
+            "open": open_questions,
+            "avg_hours": avg_hours,
+            "avg_rating": avg_rate,
+            "courses": course_stats,
+        }
+    except Exception as e:
+        logger.error("خطا در دریافت آمار: %s", e)
+        return {}
 
 def format_timedelta(delta: timedelta) -> str:
     total = int(delta.total_seconds())
@@ -617,6 +695,60 @@ def status_monitor(stop_event: threading.Event) -> None:
         if stop_event.wait(5):
             break
     display_status(final=True)
+
+
+def reminder_checker(stop_event: threading.Event, app) -> None:
+    """بررسی دوره‌ای برای سوالات بی‌پاسخ و ارسال یادآوری"""
+    import asyncio
+    
+    while not stop_event.is_set():
+        try:
+            # هر 3600 ثانیه (1 ساعت)
+            conn = get_db_connection()
+            # سوالات که بیشتر از 24 ساعت open هستند
+            rows = conn.run("""
+                SELECT id, student_id, assigned_teacher_id, assigned_teacher_name
+                FROM questions
+                WHERE status = 'open' 
+                AND reminder_sent = FALSE
+                AND created_at < NOW() - INTERVAL '24 hours'
+            """)
+            
+            if rows:
+                for row in rows:
+                    q_id, student_id, teacher_id, teacher_name = row
+                    # یادآوری برای استاد
+                    if teacher_id:
+                        try:
+                            asyncio.run(app.bot.send_message(
+                                chat_id=teacher_id,
+                                text=f"⏰ یادآوری: سوال ID {q_id} از 24 ساعت قبل پاسخ نشده است.\nلطفاً پاسخ دهید."
+                            ))
+                        except Exception as e:
+                            logger.warning("خطا در ارسال یادآوری به استاد: %s", e)
+                    
+                    # یادآوری برای کاربر
+                    try:
+                        asyncio.run(app.bot.send_message(
+                            chat_id=student_id,
+                            text=f"⏰ سوال شما هنوز پاسخ نشده است.\nاستاد {teacher_name} به زودی پاسخ خواهد داد."
+                        ))
+                    except Exception as e:
+                        logger.warning("خطا در ارسال یادآوری به کاربر: %s", e)
+                    
+                    # علامت‌گذاری reminder_sent
+                    try:
+                        conn.run("UPDATE questions SET reminder_sent = TRUE WHERE id = :qid", qid=q_id)
+                    except Exception:
+                        pass
+            
+            conn.close()
+        except Exception as e:
+            logger.error("خطا در checker reminder: %s", e)
+        
+        # منتظر 1 ساعت
+        if stop_event.wait(3600):
+            break
 
 
 def is_admin(user_id: int) -> bool:
@@ -791,27 +923,39 @@ async def admin_db_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"❌ خطا در اتصال به دیتابیس:\n{e}")
 
 
-# =====================================================
-# ====== هندلرهای اصلی ربات ======
-# =====================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_chat.type != ChatType.PRIVATE:
-        await update.message.reply_text("لطفاً در چت خصوصی با من /start را ارسال کنید.")
-        return ConversationHandler.END
-    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
-    if is_admin(update.effective_user.id):
-        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
-    keyboard = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(MESSAGES["welcome"], reply_markup=keyboard)
-    # Send a persistent reply keyboard with a quick restart button so users can
-    # re-open the bot without typing /start
-    try:
-        restart_kb = ReplyKeyboardMarkup([[KeyboardButton(RESTART_LABEL)]], resize_keyboard=True, one_time_keyboard=False)
-        await context.bot.send_message(chat_id=update.effective_user.id, text="برای شروع سریع دکمه را بزنید:", reply_markup=restart_kb)
-    except Exception:
-        pass
-    return STUDENT_PHONE
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stats - نمایش آمار و گزارش"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+    
+    stats = db_get_stats()
+    if not stats:
+        await update.message.reply_text("❌ خطا در دریافت آمار")
+        return
+    
+    course_list = "\n".join(f"  📚 {course}: {count}" for course, count in stats.get("courses", {}).items())
+    if not course_list:
+        course_list = "  بدون سوال"
+    
+    avg_hours = stats.get("avg_hours", 0)
+    hours = int(avg_hours)
+    minutes = int((avg_hours - hours) * 60)
+    
+    avg_rating = stats.get("avg_rating", 0)
+    rating_str = f"{avg_rating:.1f} / 5.0 ⭐" if avg_rating > 0 else "بدون امتیاز"
+    
+    message = (
+        f"📊 آمار و گزارش ربات:\n\n"
+        f"📈 کل سوالات: {stats['total']}\n"
+        f"✅ سوالات پاسخ‌شده: {stats['answered']}\n"
+        f"🟡 سوالات باز: {stats['open']}\n"
+        f"⏱ میانگین زمان پاسخ: {hours}h {minutes}m\n"
+        f"⭐ میانگین امتیاز: {rating_str}\n\n"
+        f"📚 سوالات به تفکیک دوره:\n{course_list}"
+    )
+    
+    await update.message.reply_text(message)
 
 
 async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -820,6 +964,91 @@ async def set_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(MESSAGES["group_set"].format(group_id=update.effective_chat.id))
     else:
         await update.message.reply_text(MESSAGES["setgroup_private"])
+
+
+async def teacher_pending_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pending - نمایش سوالات بی‌پاسخ برای استاد"""
+    try:
+        conn = get_db_connection()
+        rows = conn.run("""
+            SELECT id, student_name, course, question, created_at
+            FROM questions
+            WHERE status = 'open'
+            ORDER BY created_at ASC
+        """)
+        conn.close()
+        
+        if not rows:
+            await update.message.reply_text("✅ تمام سوالات پاسخ داده شدند!")
+            return
+        
+        message = f"📋 سوالات باز ({len(rows)} سوال):\n\n"
+        for row in rows[:10]:  # نمایش 10 تای اول
+            q_id, student_name, course, question, created_at = row
+            # محاسبه زمان گذشته
+            created_time = datetime.fromisoformat(str(created_at))
+            elapsed = datetime.now() - created_time
+            hours = int(elapsed.total_seconds() // 3600)
+            
+            short_q = question[:80] + "..." if len(question) > 80 else question
+            message += f"🆔 {q_id}\n👤 {student_name} | 📚 {course}\n⏱ {hours}h | 💬 {short_q}\n\n"
+        
+        if len(rows) > 10:
+            message += f"\n... و {len(rows)-10} سوال دیگر"
+        
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error("خطا در دریافت سوالات بی‌پاسخ: %s", e)
+        await update.message.reply_text("❌ خطا در دریافت سوالات")
+
+
+async def export_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/export - دانلود تمام سوالات و پاسخ‌ها"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text(MESSAGES["not_admin"])
+        return
+    
+    try:
+        conn = get_db_connection()
+        rows = conn.run("""
+            SELECT id, student_name, student_phone, course, question, status, 
+                   answer, answer_rating, created_at, answered_at
+            FROM questions
+            ORDER BY created_at DESC
+        """)
+        conn.close()
+        
+        if not rows:
+            await update.message.reply_text("📊 هیچ سوالی برای export وجود ندارد")
+            return
+        
+        # تولید CSV
+        import csv
+        from io import StringIO
+        
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow([
+            "ID", "نام کاربر", "شماره تلفن", "دوره", "سوال",
+            "وضعیت", "پاسخ", "امتیاز", "تاریخ سوال", "تاریخ پاسخ"
+        ])
+        
+        for row in rows:
+            writer.writerow(row)
+        
+        csv_content = csv_buffer.getvalue()
+        filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        # ارسال فایل
+        await context.bot.send_document(
+            chat_id=update.effective_user.id,
+            document=csv_content.encode('utf-8-sig'),  # UTF-8 BOM برای اکسل
+            filename=filename,
+            caption=f"📊 Export شامل {len(rows)} سوال"
+        )
+    except Exception as e:
+        logger.error("خطا در export: %s", e)
+        await update.message.reply_text("❌ خطا در دانلود گزارش")
 
 
 async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1214,7 +1443,8 @@ async def submit_answer_callback(update: Update, context: ContextTypes.DEFAULT_T
         pending_question, "answered",
         answer=combined_text,
         answer_media_file_id=answer_media_file_id,
-        answer_media_type=answer_media_type
+        answer_media_type=answer_media_type,
+        answered_at=datetime.now()
     ):
         await query.edit_message_text("❌ خطا در ثبت پاسخ. لطفاً دوباره تلاش کنید.")
         return
@@ -1250,6 +1480,24 @@ async def submit_answer_callback(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.send_document(chat_id=student_id, document=answer_media_file_id, caption="📎 فایل پاسخ")
             elif answer_media_type == "animation":
                 await context.bot.send_animation(chat_id=student_id, animation=answer_media_file_id, caption="🎬 GIF پاسخ")
+        
+        # ارسال رتینگ buttons
+        await context.bot.send_message(
+            chat_id=student_id,
+            text="⭐ لطفاً کیفیت این پاسخ را ارزیابی کنید:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("⭐", callback_data=f"rate:{pending_question}:1"),
+                    InlineKeyboardButton("⭐⭐", callback_data=f"rate:{pending_question}:2"),
+                    InlineKeyboardButton("⭐⭐⭐", callback_data=f"rate:{pending_question}:3"),
+                ],
+                [
+                    InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"rate:{pending_question}:4"),
+                    InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"rate:{pending_question}:5"),
+                ],
+            ])
+        )
+        
         await query.edit_message_text(MESSAGES["answer_sent"])
     except Exception as e:
         logger.error("خطا ارسال پاسخ: %s", e)
@@ -1279,6 +1527,26 @@ async def clear_answer_callback(update: Update, context: ContextTypes.DEFAULT_TY
         "🗑️ صف پاسخ‌ها پاک شد.\n"
         "اگر می‌خواهید دوباره پاسخ ارسال کنید، پیام‌های جدید را ارسال کنید."
     )
+
+
+async def rate_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """سیستم رتینگ پاسخ‌ها"""
+    query = update.callback_query
+    await query.answer()
+    
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        await query.edit_message_text("❌ خطا: اطلاعات نامعتبر")
+        return
+    
+    question_id = parts[1]
+    rating = int(parts[2])
+    
+    if db_rate_answer(question_id, rating):
+        stars = "⭐" * rating
+        await query.edit_message_text(f"✅ نظر شما ({stars}) با موفقیت ثبت شد.\nتشکر از بازخوردتان!")
+    else:
+        await query.edit_message_text("❌ خطا در ثبت نظر. لطفاً دوباره تلاش کنید.")
 
 
 async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1995,9 +2263,13 @@ def main() -> None:
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(submit_answer_callback, pattern=r"^submit_answer$"))
     app.add_handler(CallbackQueryHandler(clear_answer_callback, pattern=r"^clear_answer$"))
+    app.add_handler(CallbackQueryHandler(rate_answer_callback, pattern=r"^rate:"))
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("pending", teacher_pending_questions))
+    app.add_handler(CommandHandler("export", export_questions))
     app.add_handler(CallbackQueryHandler(group_callback, pattern=r"^(answer|not_related):"))
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course:"))
     app.add_handler(CallbackQueryHandler(ask_again_callback, pattern=r"^ask_again$"))
